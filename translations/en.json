@@ -16,7 +16,8 @@
         "data": {
           "code": "Authorization Code",
           "max_regular_videos": "Maximum YouTube Videos",
-          "max_short_videos": "Maximum YouTube Shorts"
+          "max_short_videos": "Maximum YouTube Shorts",
+          "USE_COMMENTS_AS_SUMMARY": "Top 5 comments as video summary instead of video description"
         }
       },
       "channels": {
@@ -44,7 +45,8 @@
         "description": "Configure the maximum number of videos to display for each sensor",
         "data": {
           "max_regular_videos": "Maximum YouTube Videos",
-          "max_short_videos": "Maximum YouTube Shorts"
+          "max_short_videos": "Maximum YouTube Shorts",
+          "USE_COMMENTS_AS_SUMMARY": "Top 5 comments as video summary instead of video description"
         }
       }
     }

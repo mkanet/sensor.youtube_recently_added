@@ -1,8 +1,13 @@
 import logging
 import os
 import json
+import io
+import re
+import html
 from datetime import datetime, timedelta
 from isodate import parse_duration
+import numpy as np
+from PIL import Image
 
 import aiohttp
 import aiofiles
@@ -15,12 +20,29 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.components import persistent_notification
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, CONF_MAX_REGULAR_VIDEOS, CONF_MAX_SHORT_VIDEOS, DEFAULT_MAX_REGULAR_VIDEOS, DEFAULT_MAX_SHORT_VIDEOS, WEBHOOK_ID
+from .const import (DOMAIN, CONF_MAX_REGULAR_VIDEOS, CONF_MAX_SHORT_VIDEOS, DEFAULT_MAX_REGULAR_VIDEOS, DEFAULT_MAX_SHORT_VIDEOS, WEBHOOK_ID, CONF_FAVORITE_CHANNELS, DEFAULT_FAVORITE_CHANNELS, get_USE_COMMENTS_AS_SUMMARY)
 
 _LOGGER = logging.getLogger(__name__)
 
 class QuotaExceededException(Exception):
     pass
+
+def filter_live_stream_title(title: str) -> str:
+    LIVE_TITLE_FILTER_ENABLED = True
+    if not LIVE_TITLE_FILTER_ENABLED:
+        return title
+
+    original_title = title    
+    if title.startswith("🔴"):
+        if "LIVE" in title[1:5]:
+            title = title[5:].lstrip(" -").lstrip()
+        else:
+            title = title[1:]
+            if title:
+                title = title[1:]
+            title = title.lstrip()
+        _LOGGER.debug(f"Filtered live prefix from title: '{original_title}' -> '{title}'")
+    return title
 
 class YouTubeAPI:
     def __init__(self, api_key, client_id, client_secret, refresh_token=None, channel_ids=None, hass=None, config_entry=None):
@@ -115,6 +137,9 @@ class YouTubeAPI:
                     coordinator = self.hass.data.get(DOMAIN, {}).get(f"{self.config_entry.entry_id}_coordinator")
                     if coordinator:
                         coordinator.data = coordinator_data
+                        coordinator.favorite_channels = [channel.strip() for channel in 
+                            self.config_entry.options.get(CONF_FAVORITE_CHANNELS, DEFAULT_FAVORITE_CHANNELS).split(',') 
+                            if channel.strip()]
                     else:
                         _LOGGER.error(f"Coordinator not found for entry {self.config_entry.entry_id}.")
                         return False
@@ -166,13 +191,17 @@ class YouTubeAPI:
         }
 
         if self.config_entry:
-            data.update({
-                "max_regular_videos": self.config_entry.options.get(CONF_MAX_REGULAR_VIDEOS, DEFAULT_MAX_REGULAR_VIDEOS),
-                "max_short_videos": self.config_entry.options.get(CONF_MAX_SHORT_VIDEOS, DEFAULT_MAX_SHORT_VIDEOS),
-            })
             coordinator = self.hass.data.get(DOMAIN, {}).get(f"{self.config_entry.entry_id}_coordinator")
             if coordinator and hasattr(coordinator, 'data'):
-                data.update(coordinator.data)
+                coordinator_data = coordinator.data.copy()
+                coordinator_data['favorite_channels'] = self.config_entry.options.get(CONF_FAVORITE_CHANNELS, DEFAULT_FAVORITE_CHANNELS)
+                data.update(coordinator_data)
+            else:
+                data.update({
+                    "max_regular_videos": self.config_entry.options.get(CONF_MAX_REGULAR_VIDEOS, DEFAULT_MAX_REGULAR_VIDEOS),
+                    "max_short_videos": self.config_entry.options.get(CONF_MAX_SHORT_VIDEOS, DEFAULT_MAX_SHORT_VIDEOS),
+                    "favorite_channels": self.config_entry.options.get(CONF_FAVORITE_CHANNELS, DEFAULT_FAVORITE_CHANNELS),
+                })
 
         await self._store.async_save(data)
 
@@ -344,7 +373,7 @@ class YouTubeAPI:
         try:
             base_url = "https://accounts.google.com/o/oauth2/auth"
             redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
-            scope = "https://www.googleapis.com/auth/youtube.readonly"
+            scope = "https://www.googleapis.com/auth/youtube.force-ssl"  # Updated scope
             
             params = {
                 "client_id": self.client_id,
@@ -375,6 +404,7 @@ class YouTubeAPI:
             "client_secret": self.client_secret,
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code",
+            "scope": "https://www.googleapis.com/auth/youtube.force-ssl"
         }
 
         try:
@@ -454,37 +484,74 @@ class YouTubeAPI:
             return {"data": [], "shorts_data": []}
 
     async def get_video_by_id(self, video_id):
-        _LOGGER.debug(f"Attempting to fetch video details for ID: {video_id}")
+        # Log the initiation of the get_video_by_id method with the given video ID
+        _LOGGER.critical(f"get_video_by_id called for video ID: {video_id}")
+        
+        # Log the current setting for using comments as summary
+        _LOGGER.critical(f"USE_COMMENTS_AS_SUMMARY is set to: {get_USE_COMMENTS_AS_SUMMARY()}")
+
+        # Check if the current API quota has been exceeded
         if self.current_quota >= 10000:
             message = f"API quota exceeded. Further attempts will resume after the quota resets at {self.quota_reset_time}"
+            # Log a warning about the API quota being exceeded
             _LOGGER.warning(message)
+            # Raise an exception to indicate quota has been exceeded
             raise QuotaExceededException(message)
         
+        # Ensure the OAuth token is valid before making the API request
         await self.ensure_valid_token()
+        
+        # Construct the YouTube API URL for fetching video details
         url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics,liveStreamingDetails&id={video_id}&key={self.api_key}"
         headers = {"Authorization": f"Bearer {self.access_token}"}
+        
         try:
+            # Create an asynchronous HTTP session
             async with aiohttp.ClientSession() as session:
+                # Make the GET request to the YouTube API
                 async with session.get(url, headers=headers, timeout=10) as response:
+                    # Read the response text
                     response_text = await response.text()
+                    
                     if response.status == 200:
+                        # Parse the JSON response
                         data = json.loads(response_text)
                         items = data.get("items", [])
+                        
                         if items:
+                            # Load stored data asynchronously
                             stored_data = await self._store.async_load()
                             oldest_video_date = None
+                            
                             if stored_data:
+                                # Combine regular and shorts video data
                                 all_videos = stored_data.get('data', []) + stored_data.get('shorts_data', [])
                                 publish_dates = [video.get('snippet', {}).get('publishedAt') for video in all_videos if video.get('snippet')]
+                                
                                 if publish_dates:
-                                    oldest_video_date = min(datetime.fromisoformat(date.rstrip('Z')).replace(tzinfo=ZoneInfo("UTC")) 
-                                                    for date in publish_dates if date)
+                                    # Determine the oldest video publication date
+                                    oldest_video_date = min(
+                                        datetime.fromisoformat(date.rstrip('Z')).replace(tzinfo=ZoneInfo("UTC")) 
+                                        for date in publish_dates if date
+                                    )
                             
+                            # Select the first item from the response as the video data
                             item = items[0]
+
+                            # Secondary check for obviously invalid or missing fields
+                            snippet_ok = bool(item.get('snippet') and item['snippet'].get('publishedAt'))
+                            content_ok = bool(item.get('contentDetails') and 'duration' in item['contentDetails'])
+
+                            if not snippet_ok or not content_ok:
+                                # Log a warning if snippet or content details are invalid/incomplete
+                                _LOGGER.warning(f"Video ID {video_id} has an invalid or incomplete snippet. Returning None.")
+                                return None
+
+                            # Parse the video's published date and time
                             video_published_at_str = item['snippet']['publishedAt']
                             video_published_at = datetime.strptime(video_published_at_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
 
-                            # Check for live stream with expanded criteria
+                            # Extract live broadcast content and streaming details
                             live_broadcast_content = item['snippet'].get('liveBroadcastContent', 'none')
                             duration = item['contentDetails'].get('duration', 'PT0M0S')
                             live_streaming_details = item.get('liveStreamingDetails', {})
@@ -494,50 +561,149 @@ class YouTubeAPI:
                             actual_end_time = live_streaming_details.get('actualEndTime')
                             scheduled_start_time = live_streaming_details.get('scheduledStartTime')
                             
-                            # Determine if this is a live stream
-                            is_live_stream = (live_broadcast_content in ['live', 'upcoming'] or 
-                                            duration == 'P0D' or 
-                                            actual_start_time is not None or
-                                            scheduled_start_time is not None)
+                            # Determine if this is a live stream based on various criteria
+                            is_live_stream = (
+                                live_broadcast_content in ['live', 'upcoming'] or 
+                                duration == 'P0D' or 
+                                actual_start_time is not None or
+                                scheduled_start_time is not None
+                            ) and not actual_end_time
 
-                            # Set to True to exclude streams that haven't started yet globally
+                            if is_live_stream:
+                                # Get the current UTC time for comparison
+                                current_time = datetime.now(ZoneInfo("UTC"))
+                                
+                                if scheduled_start_time:
+                                    # Parse the scheduled start time
+                                    scheduled_time = datetime.strptime(scheduled_start_time, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
+                                    current_time = datetime.now(ZoneInfo("UTC"))
+                                    
+                                    # Check if the scheduled stream is in the future
+                                    if scheduled_time > current_time:
+                                        if live_broadcast_content == 'upcoming' and not actual_start_time:
+                                            _LOGGER.debug(f"Processing future premiere {video_id}")
+                                            live_status = "⏰ Premiere starting soon"
+                                        else:
+                                            _LOGGER.debug(f"Skipping future scheduled stream {video_id} that hasn't started")
+                                            return None
+                                    
+                                    # Allow premieres that have started
+                                    if live_broadcast_content == 'upcoming' and scheduled_time <= current_time:
+                                        _LOGGER.debug(f"Processing started premiere {video_id}")
+                                        live_status = "🔴 PREMIERE"                                        
+                                # Skip regular live streams that haven't started
+                                if live_broadcast_content == 'live' and not actual_start_time:
+                                    _LOGGER.debug(f"Skipping offline live stream {video_id}")
+                                    return None
+
+                                if actual_end_time:
+                                    # Log that an ended stream is being skipped
+                                    _LOGGER.debug(f"Skipping ended stream {video_id}")
+                                    return None
+                                
+                                if live_broadcast_content == 'live' and not actual_start_time:
+                                    # Log that an offline live stream is being skipped
+                                    _LOGGER.debug(f"Skipping offline live stream {video_id}")
+                                    return None
+
+                                if actual_end_time:
+                                    # Log that an ended stream is being skipped
+                                    _LOGGER.debug(f"Skipping ended stream {video_id}")
+                                    return None
+
+                            # Configuration flag to exclude future live streams
                             EXCLUDE_FUTURE_LIVE_STREAMS = True
                             
-                            # Set live status based on stream state
-                            live_status = ""
+                            # Initialize live status if not already set
+                            if 'live_status' not in locals():
+                                live_status = ""
                             if is_live_stream:
-                                if actual_start_time and not actual_end_time:
-                                    live_status = "🔴 LIVE&thinsp;&thinsp;(streaming)"
-                                    _LOGGER.warning(f"Live stream detected for video {video_id} - Currently streaming")
+                                if (actual_start_time or (live_broadcast_content == 'upcoming' and 
+                                    scheduled_start_time and 
+                                    datetime.strptime(scheduled_start_time, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC")) <= datetime.now(ZoneInfo("UTC")))) and not actual_end_time:
+                                    # Retrieve and format the number of concurrent viewers
+                                    concurrent_viewers = int(live_streaming_details.get('concurrentViewers', '0'))
+                                    value = (
+                                        concurrent_viewers / 1000000 if concurrent_viewers >= 1000000 
+                                        else concurrent_viewers / 1000 if concurrent_viewers >= 1000 
+                                        else concurrent_viewers
+                                    )
+                                    suffix = 'M' if concurrent_viewers >= 1000000 else 'K' if concurrent_viewers >= 1000 else ''
+                                    formatted_viewers = (
+                                        f"{value:.1f}".rstrip('0').rstrip('.') + suffix 
+                                        if concurrent_viewers >= 1000 
+                                        else str(concurrent_viewers)
+                                    )
+                                    
+                                    # Determine live status based on broadcast content and viewer count
+                                    live_broadcast_content = item['snippet'].get('liveBroadcastContent')
+                                    if live_broadcast_content == 'upcoming':
+                                        if concurrent_viewers > 0:
+                                            live_status = f"🔴 PREMIERE - {formatted_viewers} Watching"
+                                        else:
+                                            live_status = "🔴 PREMIERE"
+                                    else:
+                                        if concurrent_viewers > 0:
+                                            live_status = f"🔴 LIVE - {formatted_viewers} Watching"
+                                        else:
+                                            live_status = "🔴 LIVE"
+                                    
+                                    # Log the detection of a live stream with current viewer count
+                                    _LOGGER.warning(f"Live stream detected for video {video_id} - Currently streaming with {concurrent_viewers} viewers")
+                                    
+                                    # Filter and update the live stream title
+                                    item['snippet']['title'] = filter_live_stream_title(item['snippet'].get('title', ''))
+                                
                                 elif actual_end_time:
+                                    # Set live status to indicate the stream has ended
                                     live_status = "📴 Stream ended"
+                                    # Log that the live stream has ended
                                     _LOGGER.warning(f"Live stream detected for video {video_id} - Stream ended at {actual_end_time}")
+                                
                                 elif scheduled_start_time:
                                     if EXCLUDE_FUTURE_LIVE_STREAMS:
+                                        # Log that a scheduled stream not yet started is being skipped
                                         _LOGGER.debug(f"Skipping scheduled stream {video_id} - Not yet started")
                                         return None
+                                    # Set live status for streams that are about to start
                                     live_status = "⏰ Streaming soon"
+                                    # Log that a live stream is scheduled
                                     _LOGGER.warning(f"Live stream detected for video {video_id} - Stream scheduled for {scheduled_start_time}")
 
                             if not is_live_stream:
-                                midnight = datetime.now(ZoneInfo("America/Los_Angeles")).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(ZoneInfo("UTC"))
-                                if video_published_at < midnight:
+                                # Get the current UTC time
+                                current_utc_time = datetime.now(ZoneInfo("UTC"))
+                                # Skip videos published in the future
+                                if video_published_at > current_utc_time:
+                                    _LOGGER.debug(f"Skipping video {video_id} published in the future at {video_published_at}")
                                     return None
-                                if oldest_video_date and video_published_at < oldest_video_date:
-                                    return None
+
+                            # Define midnight in Los Angeles timezone and convert to UTC
+                            midnight = datetime.now(ZoneInfo("America/Los_Angeles")).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(ZoneInfo("UTC"))
+                            # Skip videos published before midnight LA time
+                            if video_published_at < midnight:
+                                _LOGGER.debug(f"Skipping video {video_id} published before midnight LA time at {video_published_at}")
+                                return None
+                            # Skip videos older than the oldest video date in stored data
+                            if oldest_video_date and video_published_at < oldest_video_date:
+                                _LOGGER.debug(f"Skipping video {video_id} published before the oldest video date {oldest_video_date}")
+                                return None
                                 
+                            # Increment the current quota as this request consumes quota
                             self.current_quota += 3
 
-                            if is_live_stream and not actual_end_time:
-                                runtime = ""
-                            else:
+                            runtime = ""
+                            if not is_live_stream and not scheduled_start_time:
                                 try:
                                     duration_timedelta = parse_duration(duration)
                                     runtime = str(max(1, int(duration_timedelta.total_seconds() / 60)))
                                 except (ValueError, TypeError):
                                     _LOGGER.warning(f"Invalid duration for video {video_id}: {duration}")
-                                    runtime = ""
 
+                            # Import necessary functions for image processing
+                            from .sensor import process_image_to_portrait, process_image_to_fanart
+                            
+                            # Construct the video data dictionary with relevant details
                             video_data = {
                                 'id': item['id'],
                                 'snippet': item['snippet'],
@@ -545,28 +711,156 @@ class YouTubeAPI:
                                 'statistics': item.get('statistics', {}),
                                 'runtime': runtime,
                                 'genres': ', '.join(' '.join(word.capitalize() for word in tag.split()) for tag in item['snippet'].get('tags', [])[:2]),
-                                # 'genres': ', '.join(item['snippet'].get('tags', [])[:2]),
                                 'live_status': live_status
                             }
+
+                            # Extract thumbnails and live streaming details
+                            thumbnails = item['snippet'].get('thumbnails', {})
+                            live_streaming_details = item.get('liveStreamingDetails', {})
+                            actual_end = live_streaming_details.get('actualEndTime')
+                            actual_start_time = live_streaming_details.get('actualStartTime')
+                            is_active_stream = bool(is_live_stream and actual_start_time and not actual_end)
+
+                            if is_active_stream:
+                                # Set the poster URL for active live streams
+                                poster_url = f"https://i.ytimg.com/vi/{item['id']}/maxresdefault_live.jpg"
+                            else:
+                                # Set the poster URL for regular videos
+                                poster_url = thumbnails.get('maxres', {}).get('url') or thumbnails.get('high', {}).get('url')
+
+                            if poster_url:
+                                # Attempt to fetch and process the poster image with retries
+                                for attempt in range(3):
+                                    try:
+                                        async with aiohttp.ClientSession() as thumb_session:
+                                            async with thumb_session.get(poster_url) as thumb_resp:
+                                                if thumb_resp.status == 200:
+                                                    # Process the portrait image if the request is successful
+                                                    video_id_data = {'videoId': item['id'], 'is_live': is_active_stream}
+                                                    video_data['poster'] = await process_image_to_portrait(self.hass, poster_url, video_id_data)
+                                                    _LOGGER.debug(f"Successfully processed poster for video {video_id} on attempt {attempt + 1}")
+                                                    break
+                                                elif thumb_resp.status == 404 and attempt < 2:
+                                                    # Log and wait before retrying if the thumbnail is not found
+                                                    _LOGGER.debug(
+                                                        f"Thumbnail 404 for video {video_id}, URL: {poster_url}, attempt {attempt + 1}/3, "
+                                                        f"waiting 30s before retry"
+                                                    )
+                                                    await asyncio.sleep(30)
+                                                elif attempt < 2:
+                                                    # Log and wait before retrying for other HTTP errors
+                                                    _LOGGER.debug(
+                                                        f"Thumbnail error for video {video_id}, URL: {poster_url}, status: {thumb_resp.status}, "
+                                                        f"attempt {attempt + 1}/3, waiting 5s before retry"
+                                                    )
+                                                    await asyncio.sleep(5)
+                                                else:
+                                                    # Log an error after exhausting all retry attempts
+                                                    _LOGGER.error(f"Failed to fetch thumbnail after all retries for video {video_id}")
+                                                    video_data['poster'] = (
+                                                        "/local/youtube_thumbnails/default_poster.jpg" 
+                                                        if not is_active_stream 
+                                                        else f"/local/youtube_thumbnails/{item['id']}_live_portrait.jpg"
+                                                    )
+                                    except Exception as e:
+                                        if attempt == 2:
+                                            # Log a critical error if all retry attempts fail
+                                            _LOGGER.error(f"Error processing poster for video {video_id}: {e}")
+                                            video_data['poster'] = (
+                                                "/local/youtube_thumbnails/default_poster.jpg" 
+                                                if not is_active_stream 
+                                                else f"/local/youtube_thumbnails/{item['id']}_live_portrait.jpg"
+                                            )
+                                        else:
+                                            # Log the exception and wait before retrying
+                                            _LOGGER.debug(f"Error on attempt {attempt + 1}/3 for video {video_id}: {e}, retrying in 5s")
+                                            await asyncio.sleep(5)
+                            else:
+                                # Set a default poster if no poster URL is available
+                                video_data['poster'] = (
+                                    "/local/youtube_thumbnails/default_poster.jpg" 
+                                    if not is_active_stream 
+                                    else f"/local/youtube_thumbnails/{item['id']}_live_portrait.jpg"
+                                )
+                                _LOGGER.debug(f"Set default poster for video {video_id}")
+
+                            try:
+                                # Process fanart for the video
+                                video_id_data = {'videoId': item['id'], 'is_live': is_active_stream}
+                                video_data['fanart'] = await process_image_to_fanart(self.hass, video_id_data, thumbnails)
+                                _LOGGER.debug(f"Successfully processed fanart for video {video_id}")
+                            except Exception as e:
+                                # Log an error if fanart processing fails and set a default fanart
+                                _LOGGER.error(f"Error processing fanart for video {video_id}: {e}")
+                                video_data['fanart'] = (
+                                    "/local/youtube_thumbnails/default_fanart.jpg" 
+                                    if not is_active_stream 
+                                    else f"/local/youtube_thumbnails/{item['id']}_live_fanart.jpg"
+                                )
+                            
+                            # Log that the summary processing is about to begin
+                            _LOGGER.critical(f"About to process summary for video {video_id}")
+                            
+                            if get_USE_COMMENTS_AS_SUMMARY():
+                                try:
+                                    # Log the attempt to fetch comments for the summary
+                                    _LOGGER.critical("Attempting to fetch comments for summary")
+                                    
+                                    # Fetch top comments asynchronously
+                                    comments = await self.fetch_top_comments(item['id'])
+                                    
+                                    # Log the number of comments fetched
+                                    _LOGGER.critical(f"Fetched {len(comments)} comments")
+                                    
+                                    # Combine comments into a summary
+                                    video_data['summary'] = '\n\n'.join(comments) if comments else ''
+                                    
+                                    # Log a snippet of the final summary
+                                    _LOGGER.critical(f"Final summary (first 100 chars): {video_data.get('summary', '')[:100]}")
+                                except Exception as e:
+                                    # Log an error if fetching comments fails and set an empty summary
+                                    _LOGGER.error(f"Error processing comments for video {item['id']}: {e}")
+                                    video_data['summary'] = ''
+                            else:
+                                # Log that the description is being used as the summary
+                                _LOGGER.critical("Using description as summary (USE_COMMENTS_AS_SUMMARY is False)")
                                 
+                                # Create a summary from the video description
+                                video_data['summary'] = '\n\n'.join(item['snippet'].get('description', '').split('\n\n')[:2]).strip()
+                            
+                            # Return the constructed video data
+                            _LOGGER.debug(f"Returning video data for video ID: {video_id}")
                             return video_data
                         else:
+                            # Log a warning if no video details are found for the given video ID
                             _LOGGER.warning(f"No video details found for video ID: {video_id}")
                             return None
                     elif response.status == 403:
+                        # Handle quota exceeded error
+                        _LOGGER.warning(f"Received 403 Forbidden for video ID: {video_id}. Handling quota exceeded.")
                         await self._handle_quota_exceeded(response)
                     elif response.status == 401:
+                        # Handle unauthorized error by attempting to refresh the OAuth token
                         _LOGGER.warning("Access token expired or unauthorized during video details fetch. Attempting to refresh token.")
                         refresh_result = await self.refresh_oauth_token()
                         if refresh_result:
+                            # Update the authorization header with the new token
                             headers["Authorization"] = f"Bearer {self.access_token}"
+                            # Retry fetching the video details with the refreshed token
+                            _LOGGER.debug(f"Retrying get_video_by_id for video ID: {video_id} after refreshing token")
                             return await self.get_video_by_id(video_id)
                         else:
+                            # Log an error if refreshing the token fails
                             _LOGGER.error("Failed to refresh access token after 401 error during video details fetch.")
                     else:
+                        # Log an error for other unexpected HTTP status codes
                         _LOGGER.error(f"Failed to fetch video details for {video_id}. Status: {response.status}, Error: {response_text}")
         except Exception as e:
+            # Log any exceptions that occur during the HTTP request or processing
             _LOGGER.error(f"Exception while fetching video details for {video_id}: {e}")
+        
+        # Return None if video data could not be retrieved or processed
+        _LOGGER.debug(f"Returning None for video ID: {video_id} due to earlier issues")
         return None
 
     async def _fetch_subscriptions(self, session, headers):
@@ -626,183 +920,527 @@ class YouTubeAPI:
         return subscriptions
 
     async def _fetch_activities(self, session, headers, uploads_playlists):
+        # Initialize lists to store regular videos and shorts
         regular_videos = []
         shorts = []
+        
+        # Load stored data asynchronously
+        _LOGGER.debug("Loading stored data for fetching activities")
         stored_data = await self._store.async_load()
         oldest_video_date = None
         
         if stored_data:
+            # Combine regular and shorts videos to determine the oldest video date
             all_videos = stored_data.get('data', []) + stored_data.get('shorts_data', [])
             publish_dates = [video.get('snippet', {}).get('publishedAt') for video in all_videos if video.get('snippet')]
             if publish_dates:
-                oldest_video_date = min(datetime.fromisoformat(date.rstrip('Z')).replace(tzinfo=ZoneInfo("UTC")) 
-                                    for date in publish_dates if date)
-
+                oldest_video_date = min(
+                    datetime.fromisoformat(date.rstrip('Z')).replace(tzinfo=ZoneInfo("UTC")) 
+                    for date in publish_dates if date
+                )
+                _LOGGER.debug(f"Oldest video date determined: {oldest_video_date}")
+        
+        # Initialize sets and dictionaries to track video IDs and their corresponding items
         all_video_ids = set()
         video_id_to_item = {}
-
+        
+        # Iterate over each channel's uploads playlist, limited to the first 50
         for channel_id, playlist_id in list(uploads_playlists.items())[:50]:
+            # Check if approaching API quota limit
             if self.current_quota >= 9900:
                 _LOGGER.warning("Approaching quota limit. Stopping fetch.")
                 break
-
+            
+            # Construct the YouTube API URL for playlist items
             playlist_url = f"https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=50&playlistId={playlist_id}&key={self.api_key}"
-
+            _LOGGER.debug(f"Fetching playlist items from URL: {playlist_url}")
+            
             retry_count = 0
             max_retries = 3
             while retry_count < max_retries:
                 try:
+                    # Set a timeout for the HTTP request
                     async with async_timeout.timeout(60):
+                        # Make the GET request to the playlist URL
+                        _LOGGER.debug(f"Attempting to fetch playlist {playlist_id}, try {retry_count + 1}/{max_retries}")
                         async with session.get(playlist_url, headers=headers) as response:
                             if response.status == 200:
+                                # Parse the JSON response
                                 data = await response.json()
+                                _LOGGER.debug(f"Successfully fetched playlist {playlist_id}")
+                                
+                                # Increment quota usage and save persistent data
                                 self.current_quota += 1
                                 await self._save_persistent_data()
                                 
+                                # Process each item in the playlist
                                 for item in data.get('items', []):
                                     video_published_at_str = item['snippet']['publishedAt']
                                     video_published_at = datetime.strptime(video_published_at_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
-
+                                    
+                                    current_utc_time = datetime.now(ZoneInfo("UTC"))
+                                    
+                                    # Skip videos published in the future
+                                    if video_published_at > current_utc_time:
+                                        _LOGGER.debug(f"Skipping video {item['snippet']['resourceId']['videoId']} published in the future at {video_published_at}")
+                                        continue
+                                    
+                                    # Define midnight in Los Angeles timezone and convert to UTC
                                     midnight = datetime.now(ZoneInfo("America/Los_Angeles")).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(ZoneInfo("UTC"))
+                                    
+                                    # Check if the video was published after midnight LA time and is newer than the oldest stored video
                                     if video_published_at >= midnight and (not oldest_video_date or video_published_at >= oldest_video_date):
                                         video_id = item['snippet']['resourceId']['videoId']
                                         if video_id not in self.fetched_video_ids:
+                                            # Add unique video IDs for further processing
                                             all_video_ids.add(video_id)
                                             video_id_to_item[video_id] = item
-                                break
+                                            _LOGGER.debug(f"Added video ID {video_id} for processing")
+                                break  # Exit the retry loop on successful fetch
                             elif response.status == 403:
+                                # Handle quota exceeded error
+                                _LOGGER.warning(f"Received 403 Forbidden for playlist {playlist_id}. Handling quota exceeded.")
                                 quota_exceeded = await self._handle_quota_exceeded(response)
                                 if quota_exceeded:
-                                    raise QuotaExceededException()
+                                    _LOGGER.critical("Quota exceeded while fetching playlist activities.")
+                                    raise QuotaExceededException("Quota exceeded while fetching playlist activities.")
                                 break
                             elif response.status == 401:
+                                # Handle unauthorized error by refreshing the OAuth token
+                                _LOGGER.warning("Access token expired or unauthorized during playlist fetch. Attempting to refresh token.")
                                 refresh_result = await self.refresh_oauth_token()
                                 if refresh_result:
+                                    # Update the authorization header with the new token
                                     headers["Authorization"] = f"Bearer {self.access_token}"
                                     retry_count += 1
+                                    _LOGGER.debug(f"Retrying playlist fetch for {playlist_id} after refreshing token")
                                     continue
                                 else:
+                                    _LOGGER.error("Failed to refresh access token after 401 error during playlist fetch.")
                                     break
                             else:
+                                # Log unexpected HTTP status codes and retry
+                                _LOGGER.warning(f"Unexpected status {response.status} for playlist {playlist_id}. Retrying.")
                                 retry_count += 1
                 except asyncio.TimeoutError:
+                    # Handle timeout errors with retries
                     retry_count += 1
+                    _LOGGER.warning(f"Timeout while fetching playlist {playlist_id}. Retry {retry_count}/{max_retries}")
                     if retry_count < max_retries:
                         await asyncio.sleep(1)
                     continue
                 except Exception as e:
+                    # Log any other exceptions that occur during the fetch
                     _LOGGER.error(f"Error fetching playlist {playlist_id}: {e}")
                     break
-
+            
+            # Small delay to prevent overwhelming the API
             await asyncio.sleep(0.1)
-
+        
+        _LOGGER.debug(f"Total unique video IDs fetched: {len(all_video_ids)}")
+        
+        # Prepare to check videos in batches
         video_ids_to_check = list(all_video_ids)
         batch_size = 50
         for i in range(0, len(video_ids_to_check), batch_size):
             batch = video_ids_to_check[i:i + batch_size]
-            videos_url = f"https://www.googleapis.com/youtube/v3/videos?part=contentDetails,snippet,statistics,liveStreamingDetails&id={','.join(batch)}&key={self.api_key}"
+            videos_url = f"https://www.googleapis.com/youtube/v3/videos?part=contentDetails,snippet,liveStreamingDetails&id={','.join(batch)}&key={self.api_key}"
+            _LOGGER.debug(f"Fetching video details for batch {i // batch_size + 1}: {batch}")
+            
             try:
+                # Set a timeout for the HTTP request
                 async with async_timeout.timeout(60):
+                    # Make the GET request to the videos URL
                     async with session.get(videos_url, headers=headers) as response:
                         if response.status == 200:
+                            # Parse the JSON response
                             data = await response.json()
                             items = data.get('items', [])
                             if not items:
+                                _LOGGER.debug("No video details found in the current batch.")
                                 continue
+                            
+                            # Increment quota usage and save persistent data
                             self.current_quota += 2
                             await self._save_persistent_data()
+                            _LOGGER.debug(f"Fetched details for {len(items)} videos in the current batch")
+                            
+                            # Update statistics and comments for the batch
+                            stats_and_comments = await self.batch_update_video_statistics_and_comments(batch)
+                            _LOGGER.debug(f"Fetched statistics and comments for batch {i // batch_size + 1}")
+                            
+                            # Process each video item
                             for item in items:
                                 video_id = item['id']
                                 duration = item['contentDetails'].get('duration', 'PT0M0S')
-                                
-                                # Check if it's a live stream - expanded check
-                                live_broadcast_content = item['snippet'].get('liveBroadcastContent', 'none')
                                 live_streaming_details = item.get('liveStreamingDetails', {})
-                                is_live_stream = (live_broadcast_content in ['live', 'upcoming'] or 
-                                                duration == 'P0D' or 
-                                                live_streaming_details.get('actualStartTime') is not None or
-                                                live_streaming_details.get('scheduledStartTime') is not None)
+            
+                                live_broadcast_content = item['snippet'].get('liveBroadcastContent')
+                                actual_start_time = live_streaming_details.get('actualStartTime')
+                                actual_end = live_streaming_details.get('actualEndTime')
+                                scheduled_start = live_streaming_details.get('scheduledStartTime')
+                                
+                                # Determine if the video is a live stream
+                                is_live_stream = (
+                                    live_broadcast_content in ['live', 'upcoming'] or
+                                    duration in ['P0D', 'PT0M0S'] or
+                                    actual_start_time is not None or
+                                    scheduled_start is not None
+                                ) and not actual_end
+                                
+                                if scheduled_start and not actual_start_time:
+                                    scheduled_time = datetime.strptime(scheduled_start, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
+                                    if scheduled_time > datetime.now(ZoneInfo("UTC")):
+                                        _LOGGER.debug(f"Skipping future scheduled stream: {video_id}")
+                                        continue
                                 
                                 if is_live_stream:
-                                    # Add to regular videos if it's a live stream
+                                    if scheduled_start and not actual_start_time:
+                                        scheduled_time = datetime.strptime(scheduled_start, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
+                                        if scheduled_time > datetime.now(ZoneInfo("UTC")):
+                                            _LOGGER.debug(f"Skipping future scheduled stream: {video_id}")
+                                            continue
+                                    
+                                    # Acquire lock to safely update fetched_video_ids
                                     async with self.fetched_video_ids_lock:
                                         if video_id not in self.fetched_video_ids:
+                                            # Add video ID to fetched set to prevent reprocessing
                                             self.fetched_video_ids.add(video_id)
                                             live_status = ""
                                             runtime = ""
-                                            if live_streaming_details.get('actualStartTime') and not live_streaming_details.get('actualEndTime'):
-                                                live_status = "🔴 LIVE&thinsp;&thinsp;(streaming)"
-                                                _LOGGER.warning(f"Live stream detected for video {video_id} - Currently streaming")
-                                            elif live_streaming_details.get('actualEndTime'):
+                                            
+                                            if actual_start_time and not actual_end:
+                                                # Retrieve and format the number of concurrent viewers
+                                                concurrent_viewers = int(live_streaming_details.get('concurrentViewers', '0'))
+                                                value = (
+                                                    concurrent_viewers / 1000000 if concurrent_viewers >= 1000000 
+                                                    else concurrent_viewers / 1000 if concurrent_viewers >= 1000 
+                                                    else concurrent_viewers
+                                                )
+                                                suffix = 'M' if concurrent_viewers >= 1000000 else 'K' if concurrent_viewers >= 1000 else ''
+                                                formatted_viewers = (
+                                                    f"{value:.1f}".rstrip('0').rstrip('.') + suffix 
+                                                    if concurrent_viewers >= 1000 
+                                                    else str(concurrent_viewers)
+                                                )
+                                                
+                                                # Determine live status based on broadcast content and viewer count
+                                                live_broadcast_content = item['snippet'].get('liveBroadcastContent')
+                                                if live_broadcast_content == 'upcoming':
+                                                    if concurrent_viewers > 0:
+                                                        live_status = f"🔴 PREMIERE - {formatted_viewers} Watching"
+                                                    else:
+                                                        live_status = "🔴 PREMIERE"
+                                                else:
+                                                    if concurrent_viewers > 0:
+                                                        live_status = f"🔴 LIVE - {formatted_viewers} Watching"
+                                                    else:
+                                                        live_status = "🔴 LIVE"
+                                                
+                                                # Log the detection of an active live stream with viewer count
+                                                _LOGGER.debug(f"Live stream detected for video {video_id} - Currently streaming with {concurrent_viewers} viewers")
+                                            
+                                            elif actual_end:
+                                                # Set live status to indicate the stream has ended
                                                 live_status = "📴 Stream ended"
-                                                _LOGGER.warning(f"Live stream detected for video {video_id} - Stream ended at {live_streaming_details.get('actualEndTime')}")
                                                 try:
+                                                    # Calculate runtime based on actual start and end times
                                                     duration_timedelta = parse_duration(duration)
-                                                    duration_seconds = int(duration_timedelta.total_seconds())
-                                                    runtime = str(max(1, int(duration_seconds / 60)))
+                                                    runtime = str(max(1, int(duration_timedelta.total_seconds() / 60)))
+                                                    _LOGGER.debug(f"Runtime calculated for ended stream {video_id}: {runtime} minutes")
                                                 except (ValueError, TypeError):
-                                                    runtime = ""
-                                            elif live_streaming_details.get('scheduledStartTime'):
-                                                live_status = "⏰ Streaming soon"
-                                                _LOGGER.warning(f"Live stream detected for video {video_id} - Stream scheduled")
+                                                    # Handle invalid duration formats and calculate runtime manually
+                                                    runtime = str(
+                                                        max(1, int(
+                                                            (datetime.strptime(actual_end, '%Y-%m-%dT%H:%M:%SZ') - 
+                                                            datetime.strptime(actual_start_time, '%Y-%m-%dT%H:%M:%SZ')
+                                                            ).total_seconds() / 60
+                                                        ))
+                                                    )
+                                                    _LOGGER.debug(f"Manual runtime calculation for ended stream {video_id}: {runtime} minutes")
+                                            
+                                            # Retrieve the snippet, preferring the stored item if available
+                                            snippet = video_id_to_item.get(video_id, {}).get('snippet', item['snippet'])
+                                            if actual_start_time and not actual_end and 'title' in snippet:
+                                                # Filter and update the live stream title
+                                                snippet = snippet.copy()
+                                                snippet['title'] = filter_live_stream_title(snippet['title'])
+                                                _LOGGER.debug(f"Filtered live stream title for video {video_id}")
+                                            
+                                            # Construct the video data dictionary
                                             video_data = {
                                                 'id': video_id,
-                                                'snippet': item.get('snippet', {}),
+                                                'snippet': snippet,
                                                 'contentDetails': item['contentDetails'],
                                                 'duration': duration,
                                                 'runtime': runtime,
-                                                'live_status': live_status
+                                                'live_status': live_status,
+                                                'liveStreamingDetails': live_streaming_details
                                             }
+                                            
+                                            # Update statistics and summary if available
+                                            if video_id in stats_and_comments:
+                                                if 'statistics' not in video_data:
+                                                    video_data['statistics'] = {}
+                                                video_data['statistics'].update(stats_and_comments[video_id])
+                                                if 'comments' in stats_and_comments[video_id]:
+                                                    video_data['summary'] = stats_and_comments[video_id]['comments']
+                                            else:
+                                                # Set default statistics and summary if not available
+                                                video_data['statistics'] = {
+                                                    'viewCount': '0',
+                                                    'likeCount': '0'
+                                                }
+                                                video_data['summary'] = '\n\n'.join(video_data['snippet'].get('description', '').split('\n\n')[:2]).strip()
+                                                
+                                            # Append the processed live stream video data to regular_videos
                                             regular_videos.append(video_data)
-                                else:
-                                    try:
-                                        duration_timedelta = parse_duration(duration)
-                                        duration_seconds = int(duration_timedelta.total_seconds())
-                                    except (ValueError, TypeError):
-                                        duration_seconds = 0
-
-                                    is_short = duration_seconds <= 60 and not is_live_stream
-                                    async with self.fetched_video_ids_lock:
-                                        if video_id not in self.fetched_video_ids:
-                                            self.fetched_video_ids.add(video_id)
-                                            if is_short:
-                                                playlist_item = video_id_to_item.get(video_id, {})
-                                                short_video_data = {
+                                            _LOGGER.debug(f"Appended live stream video data for video {video_id} to regular_videos")
+                                            continue
+                                
+                                try:
+                                    # Parse the video's duration and convert it to seconds
+                                    duration_timedelta = parse_duration(duration)
+                                    duration_seconds = int(duration_timedelta.total_seconds())
+                                    _LOGGER.debug(f"Duration seconds for video {video_id}: {duration_seconds}")
+                                except (ValueError, TypeError):
+                                    # Handle invalid duration formats and set duration_seconds to 0
+                                    duration_seconds = 0
+                                    _LOGGER.debug(f"Invalid duration format for video {video_id}: {duration}")
+                                
+                                # Acquire lock to safely update fetched_video_ids
+                                async with self.fetched_video_ids_lock:
+                                    if video_id not in self.fetched_video_ids:
+                                        # Add video ID to fetched set to prevent reprocessing
+                                        self.fetched_video_ids.add(video_id)
+                                        if duration_seconds <= 60:
+                                            # Classify the video as a short if its duration is 60 seconds or less
+                                            _LOGGER.debug(f"Classifying video {video_id} as short (duration <= 60s)")
+                                            video_data = {
+                                                'id': video_id,
+                                                'snippet': video_id_to_item.get(video_id, {}).get('snippet', item['snippet']),
+                                                'contentDetails': item['contentDetails'],
+                                                'duration': duration
+                                            }
+                                            
+                                            # Update statistics and summary if available
+                                            if video_id in stats_and_comments:
+                                                if 'statistics' not in video_data:
+                                                    video_data['statistics'] = {}
+                                                video_data['statistics'].update(stats_and_comments[video_id])
+                                                if 'comments' in stats_and_comments[video_id]:
+                                                    video_data['summary'] = stats_and_comments[video_id]['comments']
+                                            else:
+                                                # Set default summary if comments are not available
+                                                video_data['summary'] = '\n\n'.join(video_data['snippet'].get('description', '').split('\n\n')[:2]).strip()
+                                                
+                                            # Append the processed short video data to shorts
+                                            shorts.append(video_data)
+                                            _LOGGER.debug(f"Appended short video data for video {video_id} to shorts")
+                                        elif duration_seconds <= 180:
+                                            # Handle videos with duration between 61 and 180 seconds
+                                            async def check_portrait(url):
+                                                if not url:
+                                                    _LOGGER.debug(f"No thumbnail URL provided for portrait check on video {video_id}")
+                                                    return False
+                                                try:
+                                                    # Fetch the thumbnail image asynchronously
+                                                    _LOGGER.debug(f"Fetching thumbnail from URL: {url} for portrait check on video {video_id}")
+                                                    session = async_get_clientsession(self.hass)
+                                                    async with session.get(url) as resp:
+                                                        if resp.status != 200:
+                                                            _LOGGER.debug(f"Failed to fetch image from URL: {url} with status {resp.status}")
+                                                            return False
+                                                        image_data = await resp.read()
+                                                    
+                                                    # Open the image using PIL
+                                                    with Image.open(io.BytesIO(image_data)) as img:
+                                                        width, height = img.size
+                                                        _LOGGER.debug(f"Image dimensions for portrait check on video {video_id}: {width}x{height}")
+                                                        
+                                                        # Skip processing if the image is square (likely a profile picture)
+                                                        if width == height:
+                                                            _LOGGER.debug(f"Image is square for video {video_id}; skipping portrait check.")
+                                                            return False
+                                                        
+                                                        # If the image is already in portrait format, return True
+                                                        if width < height:
+                                                            _LOGGER.debug(f"Image is in portrait orientation for video {video_id}.")
+                                                            return True
+                                                        
+                                                        img_gray = img.convert('L')
+                                                        
+                                                        # YouTube Shorts uses exact thirds
+                                                        third_width = width // 3
+                                                        
+                                                        # Crop the image into three vertical sections
+                                                        left_side = np.array(img_gray.crop((0, 0, third_width, height)))
+                                                        center = np.array(img_gray.crop((third_width, 0, third_width * 2, height)))
+                                                        right_side = np.array(img_gray.crop((third_width * 2, 0, width, height)))
+                                                        
+                                                        # Calculate the mean brightness of each section
+                                                        left_mean = np.mean(left_side)
+                                                        right_mean = np.mean(right_side)
+                                                        center_mean = np.mean(center)
+                                                        
+                                                        # Calculate the 20th percentile brightness for the left and right sides
+                                                        left_dark = np.percentile(left_side, 20)
+                                                        right_dark = np.percentile(right_side, 20)
+                                                        
+                                                        # Determine if the edges are significantly darker than the center
+                                                        edges_darker = (
+                                                            left_mean < center_mean * 0.8 and right_mean < center_mean * 0.8
+                                                        )
+                                                        
+                                                        is_portrait = edges_darker
+                                                        if is_portrait:
+                                                            # Calculate the ratio of the center width to height
+                                                            center_width = third_width
+                                                            center_ratio = center_width / height
+                                                            ratio_tolerance = 0.1  # Default tolerance for max resolution images
+                                                            
+                                                            # Adjust tolerance based on the image URL
+                                                            if any(x in url for x in ['hqdefault', 'sddefault', 'mqdefault', 'default']):
+                                                                ratio_tolerance = 0.2
+                                                            
+                                                            # Check if the center ratio is within the acceptable tolerance
+                                                            is_portrait = abs(center_ratio - (9/16)) <= ratio_tolerance
+                                                        
+                                                        # Log detailed metrics used for portrait determination
+                                                        _LOGGER.debug(f"Side means for portrait check - Left: {left_mean:.1f}, Center: {center_mean:.1f}, Right: {right_mean:.1f}")
+                                                        _LOGGER.debug(f"Dark percentiles for portrait check - Left: {left_dark:.1f}, Right: {right_dark:.1f}")
+                                                        _LOGGER.debug(f"Is portrait for video {video_id}: {is_portrait}")
+                                                        
+                                                        return is_portrait
+                                                        
+                                                except Exception as e:
+                                                    # Log any exceptions that occur during the portrait check
+                                                    _LOGGER.debug(f"Error in check_portrait for video {video_id}: {str(e)}")
+                                                    return False
+                                            
+                                            # Retrieve the thumbnail URL for the portrait check
+                                            thumb_url = item['snippet'].get('thumbnails', {}).get('maxres', {}).get('url') or item['snippet'].get('thumbnails', {}).get('high', {}).get('url')
+                                            _LOGGER.debug(f"Checking portrait orientation for video {video_id} with duration <= 180s")
+                                            
+                                            if thumb_url and await check_portrait(thumb_url):
+                                                # Classify the video as a short with portrait orientation
+                                                _LOGGER.debug(f"Classifying video {video_id} as short (portrait orientation)")
+                                                video_data = {
                                                     'id': video_id,
-                                                    'snippet': playlist_item.get('snippet', {}),
+                                                    'snippet': video_id_to_item.get(video_id, {}).get('snippet', item['snippet']),
                                                     'contentDetails': item['contentDetails'],
                                                     'duration': duration
                                                 }
-                                                shorts.append(short_video_data)
+                                                
+                                                # Update statistics and summary if available
+                                                if video_id in stats_and_comments:
+                                                    if 'statistics' not in video_data:
+                                                        video_data['statistics'] = {}
+                                                    video_data['statistics'].update(stats_and_comments[video_id])
+                                                    if 'comments' in stats_and_comments[video_id]:
+                                                        video_data['summary'] = stats_and_comments[video_id]['comments']
+                                                else:
+                                                    # Set default summary if comments are not available
+                                                    video_data['summary'] = '\n\n'.join(video_data['snippet'].get('description', '').split('\n\n')[:2]).strip()
+                                                    
+                                                # Append the processed short video data to shorts
+                                                shorts.append(video_data)
+                                                _LOGGER.debug(f"Appended short video data for video {video_id} to shorts")
                                             else:
+                                                # Classify the video as a regular video if not in portrait orientation
+                                                _LOGGER.debug(f"Classifying video {video_id} as regular video (not portrait)")
                                                 video_data = {
                                                     'id': video_id,
-                                                    'snippet': playlist_item.get('snippet', {}),
+                                                    'snippet': video_id_to_item.get(video_id, {}).get('snippet', item['snippet']),
                                                     'contentDetails': item['contentDetails'],
-                                                    'statistics': {'viewCount': '0', 'likeCount': '0', 'commentCount': '0'},
                                                     'duration': duration,
                                                     'runtime': str(max(1, int(duration_seconds / 60)))
                                                 }
+                                                
+                                                # Update statistics and summary if available
+                                                if video_id in stats_and_comments:
+                                                    if 'statistics' not in video_data:
+                                                        video_data['statistics'] = {}
+                                                    video_data['statistics'].update(stats_and_comments[video_id])
+                                                    if 'comments' in stats_and_comments[video_id]:
+                                                        video_data['summary'] = stats_and_comments[video_id]['comments']
+                                                else:
+                                                    # Set default statistics and summary if not available
+                                                    video_data['statistics'] = {
+                                                        'viewCount': '0',
+                                                        'likeCount': '0'
+                                                    }
+                                                    video_data['summary'] = '\n\n'.join(video_data['snippet'].get('description', '').split('\n\n')[:2]).strip()
+                                                    
+                                                # Append the processed regular video data to regular_videos
                                                 regular_videos.append(video_data)
+                                                _LOGGER.debug(f"Appended regular video data for video {video_id} to regular_videos")
+                                    else:
+                                        # Classify the video as a regular video if duration is greater than 180 seconds
+                                        _LOGGER.debug(f"Classifying video {video_id} as regular video (duration > 180s)")
+                                        video_data = {
+                                            'id': video_id,
+                                            'snippet': video_id_to_item.get(video_id, {}).get('snippet', item['snippet']),
+                                            'contentDetails': item['contentDetails'],
+                                            'duration': duration,
+                                            'runtime': str(max(1, int(duration_seconds / 60)))
+                                        }
+                                        
+                                        # Update statistics and summary if available
+                                        if video_id in stats_and_comments:
+                                            if 'statistics' not in video_data:
+                                                video_data['statistics'] = {}
+                                            video_data['statistics'].update(stats_and_comments[video_id])
+                                            if 'comments' in stats_and_comments[video_id]:
+                                                video_data['summary'] = stats_and_comments[video_id]['comments']
+                                        else:
+                                            # Set default statistics and summary if not available
+                                            video_data['statistics'] = {
+                                                'viewCount': '0',
+                                                'likeCount': '0'
+                                            }
+                                            video_data['summary'] = '\n\n'.join(video_data['snippet'].get('description', '').split('\n\n')[:2]).strip()
+                                            
+                                        # Append the processed regular video data to regular_videos
+                                        regular_videos.append(video_data)
+                                        _LOGGER.debug(f"Appended regular video data for video {video_id} to regular_videos")
                         elif response.status == 403:
+                            # Handle quota exceeded error
+                            _LOGGER.warning(f"Received 403 Forbidden for videos batch fetch. Handling quota exceeded.")
                             quota_exceeded = await self._handle_quota_exceeded(response)
                             if quota_exceeded:
-                                raise QuotaExceededException()
+                                _LOGGER.critical("Quota exceeded while fetching video details.")
+                                raise QuotaExceededException("Quota exceeded while fetching video details.")
                         elif response.status == 401:
+                            # Handle unauthorized error by refreshing the OAuth token
+                            _LOGGER.warning("Access token expired or unauthorized during video details fetch. Attempting to refresh token.")
                             refresh_result = await self.refresh_oauth_token()
                             if refresh_result:
+                                # Update the authorization header with the new token
                                 headers["Authorization"] = f"Bearer {self.access_token}"
+                                _LOGGER.debug(f"Retrying video details fetch for batch {i // batch_size + 1} after refreshing token")
                                 continue
                             else:
-                                break
+                                _LOGGER.error("Failed to refresh access token after 401 error during video details fetch.")
+                        else:
+                            # Log unexpected HTTP status codes
+                            _LOGGER.error(f"Failed to fetch video details for batch {i // batch_size + 1}. Status: {response.status}")
             except asyncio.TimeoutError:
+                # Handle timeout errors during video batch processing
+                _LOGGER.warning(f"Timeout while fetching video details for batch {i // batch_size + 1}. Continuing to next batch.")
                 continue
             except Exception as e:
-                _LOGGER.error(f"Error processing video batch: {e}")
+                # Log any other exceptions that occur during video batch processing
+                _LOGGER.error(f"Error processing video batch {i // batch_size + 1}: {e}")
                 continue
-
+            
+            # Small delay to prevent overwhelming the API
             await asyncio.sleep(0.1)
-
+        
+        # Log the total number of regular videos and shorts fetched
+        _LOGGER.debug(f"Finished fetching activities. Total regular videos: {len(regular_videos)}, Total shorts: {len(shorts)}")
+        
+        # Return the collected regular videos and shorts
         return {"data": regular_videos, "shorts_data": shorts}
 
     async def _handle_quota_exceeded(self, response):
@@ -969,6 +1607,9 @@ class YouTubeAPI:
                         else:
                             _LOGGER.critical(f"Failed to subscribe to PubSubHubbub for channel {channel_id}. Status: {response.status}, Error: {response_text}")
                             subscription_results.append((channel_id, False))
+            except asyncio.CancelledError:
+                _LOGGER.debug(f"Subscription cancelled for channel {channel_id} during reload")
+                return subscription_results
             except Exception as e:
                 _LOGGER.critical(f"Unexpected error in subscribe_to_pubsub for channel {channel_id}: {str(e)}")
                 subscription_results.append((channel_id, False))
@@ -1050,6 +1691,7 @@ class YouTubeAPI:
             "client_secret": self.client_secret,
             "refresh_token": self.refresh_token,
             "grant_type": "refresh_token",
+            "scope": "https://www.googleapis.com/auth/youtube.force-ssl"  # Added scope
         }
 
         try:
@@ -1085,18 +1727,19 @@ class YouTubeAPI:
                 _LOGGER.error("No refresh token available")
                 return None
                 
-            if self.token_expiration and datetime.now(ZoneInfo("UTC")) < self.token_expiration - timedelta(minutes=5):
+            current_time = datetime.now(ZoneInfo("UTC"))
+            if self.token_expiration and current_time < self.token_expiration - timedelta(minutes=5):
                 if self.access_token:
                     _LOGGER.debug("Existing token is still valid")
                     return self.access_token
                     
-            _LOGGER.debug("Token expired or not set, attempting to refresh")
+            _LOGGER.debug("Token expired or not set, attempting to refresh with force-ssl scope")
             return await self.refresh_oauth_token()
         except Exception as e:
             _LOGGER.error(f"Failed to ensure valid token: {str(e)}")
             try:
                 if self.refresh_token:
-                    _LOGGER.debug("Attempting token refresh after error")
+                    _LOGGER.debug("Attempting token refresh with force-ssl scope after error")
                     return await self.refresh_oauth_token()
             except Exception as refresh_error:
                 _LOGGER.error(f"Failed to refresh token after error: {str(refresh_error)}")
@@ -1327,3 +1970,299 @@ class YouTubeAPI:
         
         return False
 
+    async def batch_update_video_statistics_and_comments(self, video_ids):
+        """
+        Batch update video statistics and comments for a list of video IDs.
+
+        Args:
+            video_ids (list): List of YouTube video IDs to update.
+
+        Returns:
+            dict: A dictionary containing updated statistics and comments for each video.
+        """
+        # Log the initiation of the batch update method
+        _LOGGER.critical("batch_update_video_statistics_and_comments method called")
+        
+        # Check if there are video IDs to process and if the quota is not exceeded
+        if not video_ids or self.current_quota >= 10000:
+            _LOGGER.critical(f"Skipping updates - Empty IDs: {not video_ids}, Quota: {self.current_quota}")
+            return {}
+        
+        # Log the number of videos being processed
+        _LOGGER.critical(f"Processing {len(video_ids)} videos")
+        
+        # Initialize a dictionary to store video statistics and comments
+        video_stats = {}
+        batch_size = 50  # Define the batch size for API requests
+        
+        # Create an asynchronous HTTP session
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            
+            # Iterate over the video IDs in batches
+            for i in range(0, len(video_ids), batch_size):
+                batch = video_ids[i:i + batch_size]
+                _LOGGER.critical(f"Processing batch {i // batch_size + 1} with {len(batch)} videos")
+                
+                # Construct the YouTube API URL for fetching video details
+                videos_url = (
+                    f"https://www.googleapis.com/youtube/v3/videos?"
+                    f"part=statistics,contentDetails,liveStreamingDetails,snippet&"
+                    f"id={','.join(batch)}&key={self.api_key}"
+                )
+                
+                try:
+                    # Make the GET request to the YouTube API
+                    async with session.get(videos_url, headers=headers) as response:
+                        _LOGGER.critical(f"Video stats API response status: {response.status}")
+                        
+                        if response.status == 200:
+                            # Parse the JSON response
+                            data = await response.json()
+                            items = data.get('items', [])
+                            
+                            # Increment quota usage and save persistent data
+                            self.current_quota += 1
+                            await self._save_persistent_data()
+                            
+                            # Iterate over each video item in the response
+                            for item in items:
+                                video_id = item['id']
+                                _LOGGER.critical(f"Processing video {video_id}")
+                                
+                                # Initialize the statistics dictionary for the video
+                                video_stats[video_id] = {
+                                    **item.get('statistics', {}),
+                                    'liveStreamingDetails': item.get('liveStreamingDetails', {})
+                                }
+                                
+                                # Ensure viewCount and likeCount are present
+                                video_stats[video_id]['viewCount'] = video_stats[video_id].get('viewCount', '0')
+                                video_stats[video_id]['likeCount'] = video_stats[video_id].get('likeCount', '0')
+                                
+                                # Extract live streaming details
+                                live_streaming_details = item.get('liveStreamingDetails', {})
+                                video_stats[video_id]['liveStreamingDetails'] = live_streaming_details
+                                actual_start_time = live_streaming_details.get('actualStartTime')
+                                actual_end_time = live_streaming_details.get('actualEndTime')
+                                
+                                # Log live streaming details
+                                _LOGGER.critical(f"Live streaming details for {video_id}: {live_streaming_details}")
+                                
+                                # Determine if the video is currently live
+                                if actual_start_time and not actual_end_time:
+                                    _LOGGER.critical(f"Video {video_id} is live")
+                                    _LOGGER.critical(f"Full response item for live video: {item}")
+                                    
+                                    # Retrieve and format the number of concurrent viewers
+                                    concurrent_viewers = int(live_streaming_details.get('concurrentViewers', '0'))
+                                    value = (
+                                        concurrent_viewers / 1000000 if concurrent_viewers >= 1000000
+                                        else concurrent_viewers / 1000 if concurrent_viewers >= 1000
+                                        else concurrent_viewers
+                                    )
+                                    suffix = 'M' if concurrent_viewers >= 1000000 else 'K' if concurrent_viewers >= 1000 else ''
+                                    formatted_viewers = (
+                                        f"{value:.1f}".rstrip('0').rstrip('.') + suffix
+                                        if concurrent_viewers >= 1000
+                                        else str(concurrent_viewers)
+                                    )
+                                    
+                                    # Determine live status based on broadcast content and viewer count
+                                    live_broadcast_content = item['snippet'].get('liveBroadcastContent', 'none')
+                                    if live_broadcast_content == 'upcoming':
+                                        if concurrent_viewers > 0:
+                                            live_status = f"🔴 PREMIERE - {formatted_viewers} Watching"
+                                        else:
+                                            live_status = "🔴 PREMIERE"
+                                    else:
+                                        if concurrent_viewers > 0:
+                                            live_status = f"🔴 LIVE - {formatted_viewers} Watching"
+                                        else:
+                                            live_status = "🔴 LIVE"
+                                    
+                                    # Update the live status and viewer count in the statistics
+                                    video_stats[video_id]['live_status'] = live_status
+                                    video_stats[video_id]['concurrentViewers'] = concurrent_viewers
+                                    video_stats[video_id]['runtime'] = ""
+                                    
+                                    # Ensure the 'statistics' key exists
+                                    if 'statistics' not in video_stats[video_id]:
+                                        video_stats[video_id]['statistics'] = {}
+                                
+                                elif actual_end_time:
+                                    # Handle the scenario where the live stream has ended
+                                    _LOGGER.critical(f"Video {video_id} stream ended")
+                                    video_stats[video_id]['live_status'] = "📴 Stream ended"
+                                    
+                                    try:
+                                        # Parse the video's duration and calculate runtime in minutes
+                                        duration = item['contentDetails'].get('duration', 'PT0M0S')
+                                        duration_timedelta = parse_duration(duration)
+                                        runtime = str(max(1, int(duration_timedelta.total_seconds() / 60)))
+                                    except (ValueError, TypeError):
+                                        # If duration parsing fails, calculate runtime manually
+                                        runtime = str(
+                                            max(1, int(
+                                                (datetime.strptime(actual_end_time, '%Y-%m-%dT%H:%M:%SZ') - 
+                                                datetime.strptime(actual_start_time, '%Y-%m-%dT%H:%M:%SZ')
+                                                ).total_seconds() / 60
+                                            ))
+                                        )
+                                    
+                                    # Update the runtime in the statistics
+                                    video_stats[video_id]['runtime'] = runtime
+                                
+                                # Determine whether to use comments as summary
+                                if get_USE_COMMENTS_AS_SUMMARY():
+                                    _LOGGER.critical(f"Fetching comments for video {video_id}")
+                                    
+                                    # Construct the YouTube API URL for fetching comments
+                                    comments_url = (
+                                        f"https://www.googleapis.com/youtube/v3/commentThreads?"
+                                        f"part=snippet&videoId={video_id}&maxResults=5&order=relevance&key={self.api_key}"
+                                    )
+                                    
+                                    # Make the GET request to fetch comments
+                                    async with session.get(comments_url, headers=headers) as comments_response:
+                                        _LOGGER.critical(f"Comments API response status for {video_id}: {comments_response.status}")
+                                        
+                                        if comments_response.status == 200:
+                                            # Parse the JSON response for comments
+                                            comments_data = await comments_response.json()
+                                            
+                                            # Increment quota usage and save persistent data
+                                            self.current_quota += 1
+                                            await self._save_persistent_data()
+                                            
+                                            comments = []
+                                            # Iterate over each comment item
+                                            for comment_item in comments_data.get('items', []):
+                                                snippet = comment_item.get('snippet', {}).get('topLevelComment', {}).get('snippet', {})
+                                                author = snippet.get('authorDisplayName', '')
+                                                text = snippet.get('textDisplay', '')
+                                                
+                                                if author and text:
+                                                    # Clean and format the comment text
+                                                    text = re.sub(r'[.,]?\s*<br\s*/?>\s*[.,]?', '\n', text, flags=re.IGNORECASE)
+                                                    text = re.sub(r'<a\s+href=["\'](.*?)["\']\s*>(.*?)</a>', r'\1 \2', text, flags=re.IGNORECASE)
+                                                    text = re.sub(r'<[^>]+>', '', text)
+                                                    text = html.unescape(text)
+                                                    text = text.strip()
+                                                    
+                                                    # Append the formatted comment
+                                                    comments.append(f"{author}\n{text}")
+                                            
+                                            # Update the summary with fetched comments
+                                            video_stats[video_id]['comments'] = '\n\n'.join(comments) if comments else ''
+                                            _LOGGER.critical(f"Added {len(comments)} comments for video {video_id}")
+                                else:
+                                    # Use the video description as the summary if comments are not used
+                                    description = item.get('snippet', {}).get('description', '')
+                                    video_stats[video_id]['comments'] = '\n\n'.join(description.split('\n\n')[:2]).strip()
+                                    _LOGGER.critical(f"Using description as summary for video {video_id}")
+                        
+                        elif response.status == 403:
+                            # Handle quota exceeded error
+                            _LOGGER.critical("Received 403 error, checking quota")
+                            quota_exceeded = await self._handle_quota_exceeded(response)
+                            if quota_exceeded:
+                                raise QuotaExceededException("Quota exceeded while fetching video details.")
+                        else:
+                            # Log unexpected HTTP status codes
+                            _LOGGER.critical(f"Unexpected API status: {response.status}")
+                
+                except Exception as e:
+                    # Log any exceptions that occur during batch processing
+                    _LOGGER.critical(f"Error processing batch: {str(e)}", exc_info=True)
+            
+            # Log the completion of the batch update process
+            _LOGGER.critical(f"Completed processing with {len(video_stats)} video updates")
+            
+            # Return the updated video statistics and comments
+            return video_stats
+
+    async def fetch_top_comments(self, video_id, max_results=5):
+        """Fetch top comments for a video if quota allows, otherwise return empty list."""
+        _LOGGER.critical(f"Starting fetch_top_comments for video {video_id}")
+        _LOGGER.critical(f"Current quota: {self.current_quota}, USE_COMMENTS_AS_SUMMARY: {get_USE_COMMENTS_AS_SUMMARY}")
+
+        if self.current_quota >= 10000:
+            _LOGGER.critical("Skipping comments fetch due to quota limit")
+            return []
+            
+        try:
+            _LOGGER.critical("Ensuring valid token for comments fetch")
+            await self.ensure_valid_token()
+            
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            async with aiohttp.ClientSession() as session:
+                # Check if video is live stream first
+                video_url = f"https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id={video_id}&key={self.api_key}"
+                async with session.get(video_url, headers=headers) as video_response:
+                    if video_response.status == 200:
+                        video_data = await video_response.json()
+                        live_details = video_data.get('items', [{}])[0].get('liveStreamingDetails', {})
+                        if live_details.get('actualStartTime') and not live_details.get('actualEndTime'):
+                            _LOGGER.debug(f"Skipping comments for active live stream {video_id}")
+                            return []
+
+                # Preliminary check for comment accessibility with part="id"
+                access_check_url = f"https://www.googleapis.com/youtube/v3/commentThreads?part=id&videoId={video_id}&maxResults=1&key={self.api_key}"
+                async with session.get(access_check_url, headers=headers) as access_response:
+                    if access_response.status == 403:
+                        _LOGGER.critical(f"Insufficient permissions to fetch comments for video {video_id}")
+                        return []
+
+                url = f"https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&videoId={video_id}&maxResults={max_results}&order=relevance&key={self.api_key}"
+                
+                _LOGGER.critical(f"Making API request to fetch comments for video {video_id}")
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        self.current_quota += 1
+                        await self._save_persistent_data()
+                        
+                        comments = []
+                        for item in data.get('items', []):
+                            snippet = item.get('snippet', {}).get('topLevelComment', {}).get('snippet', {})
+                            author = snippet.get('authorDisplayName', '')
+                            text = snippet.get('textDisplay', '')
+                            
+                            if author and text:
+                                # Replace <br> tags with newline characters
+                                text = re.sub(r'[.,]?\s*<br\s*/?>\s*[.,]?', '\n', text, flags=re.IGNORECASE)
+                                # text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+                                
+                                # Convert <a href="URL">Text</a> to 'URL Text'
+                                text = re.sub(
+                                    r'<a\s+href=["\'](.*?)["\']\s*>(.*?)</a>',
+                                    r'\1 \2',
+                                    text,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Remove any remaining HTML tags
+                                text = re.sub(r'<[^>]+>', '', text)
+                                
+                                # Unescape HTML entities
+                                text = html.unescape(text)
+                                
+                                # Remove leading/trailing whitespace
+                                text = text.strip()
+                                
+                                comments.append(f"{author}\n{text}")
+                        _LOGGER.critical(f"Successfully fetched {len(comments)} comments for video {video_id}")
+                        if comments:
+                            _LOGGER.critical(f"First comment: {comments[0][:100]}...")
+                        return comments
+                    elif response.status == 403:
+                        _LOGGER.critical(f"403 error fetching comments for video {video_id}")
+                        await self._handle_quota_exceeded(response)
+                        return []
+                    else:
+                        _LOGGER.critical(f"Error {response.status} fetching comments for video {video_id}")
+                        return []
+        except Exception as e:
+            _LOGGER.critical(f"Exception fetching comments for video {video_id}: {e}")
+            return []
