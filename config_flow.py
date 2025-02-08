@@ -129,7 +129,6 @@ class YouTubeRecentlyAddedConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class YouTubeRecentlyAddedOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry):
-        self.config_entry = config_entry
         self.youtube_api = None
         self.auth_url = None
         self.options = dict(config_entry.data)

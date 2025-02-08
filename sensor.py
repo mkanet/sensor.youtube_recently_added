@@ -100,7 +100,7 @@ async def process_image_to_portrait(hass: HomeAssistant, url: str, video_id) -> 
                 _LOGGER.debug(f"Thumbnail not yet available for video {video_id} (404 response)")
                 return url
             elif resp.status != 200:
-                _LOGGER.error(f"Failed to download image from URL: {url} with status code: {resp.status}")
+                # _LOGGER.error(f"Failed to download image from URL: {url} with status code: {resp.status}")
                 return url
             image_data = await resp.read()
     except Exception as e:
@@ -224,7 +224,7 @@ async def process_image_to_fanart(hass: HomeAssistant, video_id, thumbnails: dic
     try:
         async with session.get(url) as resp:
             if resp.status != 200:
-                _LOGGER.error(f"Failed to download image from URL: {url} with status code: {resp.status}")
+                # _LOGGER.error(f"Failed to download image from URL: {url} with status code: {resp.status}")
                 return url
             image_data = await resp.read()
     except Exception as e:
@@ -361,28 +361,28 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def async_setup(self):
         stored_data = await self.store.async_load()
-        _LOGGER.critical(f"Loaded stored_data: {stored_data}")  # Add this line
+        # _LOGGER.critical(f"Loaded stored_data: {stored_data}")
         if stored_data:
             self.data = {
                 "data": stored_data.get("data", []),
                 "shorts_data": stored_data.get("shorts_data", []),
                 "favorite_channels": stored_data.get("favorite_channels", [])
             }
-            _LOGGER.critical(f"Initialized self.data: {self.data}")  # Add this line
+            # _LOGGER.critical(f"Initialized self.data: {self.data}")
             self.last_webhook_time = stored_data.get("last_webhook_time")
             if self.last_webhook_time:
                 self.last_webhook_time = datetime.fromisoformat(self.last_webhook_time)
 
     async def handle_webhook_update(self, video_id, is_deleted):
         # Log the initiation of the webhook update handling with video ID and deletion status
-        _LOGGER.critical(f"handle_webhook_update called for video {video_id}, is_deleted: {is_deleted}")
+        # _LOGGER.critical(f"handle_webhook_update called for video {video_id}, is_deleted: {is_deleted}")
         
         # Log the current setting for using comments as summary
-        _LOGGER.critical(f"USE_COMMENTS_AS_SUMMARY setting: {get_USE_COMMENTS_AS_SUMMARY()}")
+        # _LOGGER.critical(f"USE_COMMENTS_AS_SUMMARY setting: {get_USE_COMMENTS_AS_SUMMARY()}")
         
         if is_deleted:
             # Log that the video is marked for deletion
-            _LOGGER.critical(f"Processing deletion for video {video_id}")
+            # _LOGGER.critical(f"Processing deletion for video {video_id}")
             
             # Remove the video from the main data and shorts data lists
             self.data["data"] = [v for v in self.data.get("data", []) if v["id"] != video_id]
@@ -393,19 +393,19 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
             await self.store.async_save(self.data)
         else:
             # Log that the system is fetching video details for the given video ID
-            _LOGGER.critical(f"Fetching video details for {video_id}")
+            # _LOGGER.critical(f"Fetching video details for {video_id}")
             
             # Fetch video data asynchronously using the YouTube API
             video_data = await self.youtube.get_video_by_id(video_id)
             
             if not video_data:
                 # Log that no video data was returned and the video will be skipped
-                _LOGGER.critical(f"Skipping video {video_id} because get_video_by_id returned None.")
+                # _LOGGER.critical(f"Skipping video {video_id} because get_video_by_id returned None.")
                 return
             
             if video_data:
                 # Log successful retrieval of video data
-                _LOGGER.critical(f"Successfully fetched video data for {video_id}")
+                # _LOGGER.critical(f"Successfully fetched video data for {video_id}")
                 
                 # Extract relevant details from the video data
                 duration = video_data['contentDetails'].get('duration', 'PT0M0S')
@@ -424,7 +424,7 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                 ) and not actual_end
                 
                 # Log the live stream status of the video
-                _LOGGER.critical(f"Video {video_id} live stream status: {is_live_stream}")
+                # _LOGGER.critical(f"Video {video_id} live stream status: {is_live_stream}")
                 
                 if is_live_stream:
                     if scheduled_start and not actual_start_time:
@@ -505,7 +505,7 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                                         live_status = "🔴 LIVE"
                                 
                                 # Log the detection of a live stream with current viewer count
-                                _LOGGER.critical(f"Live stream detected for video {video_id} - Currently streaming with {concurrent_viewers} viewers")
+                                # _LOGGER.critical(f"Live stream detected for video {video_id} - Currently streaming with {concurrent_viewers} viewers")
                                 
                                 # If viewers are present or it's the last retry, update the video data and save
                                 if concurrent_viewers > 0 or attempt == max_retries - 1:
@@ -637,14 +637,14 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                     self.async_set_updated_data(self.data)
                     
                     # Log that the live stream video has been processed and saved
-                    _LOGGER.critical(f"Live stream video {video_id} processed and saved")
+                    # _LOGGER.critical(f"Live stream video {video_id} processed and saved")
                     return
                 
                 try:
                     # Parse the duration of the video and convert it to seconds
                     duration_timedelta = parse_duration(duration)
                     duration_seconds = int(duration_timedelta.total_seconds())
-                    _LOGGER.critical(f"Video {video_id} duration: {duration_seconds} seconds")
+                    # _LOGGER.critical(f"Video {video_id} duration: {duration_seconds} seconds")
                 except (ValueError, TypeError):
                     # Handle invalid duration formats
                     duration_seconds = 0
@@ -666,7 +666,7 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                 is_short = False
                 if duration_seconds <= 60:
                     # Classify the video as a short if its duration is 60 seconds or less
-                    _LOGGER.critical(f"Video {video_id} classified as short (duration <= 60s)")
+                    # _LOGGER.critical(f"Video {video_id} classified as short (duration <= 60s)")
                     is_short = True
                 elif duration_seconds <= 180:
                     async def check_portrait(url):
@@ -750,15 +750,15 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                     poster_url = thumbnails.get('maxres', {}).get('url') or thumbnails.get('high', {}).get('url')
                     
                     # Log that the system is checking for portrait orientation in a short video
-                    _LOGGER.critical(f"Checking portrait orientation for video {video_id} (<= 180s)")
+                    # _LOGGER.critical(f"Checking portrait orientation for video {video_id} (<= 180s)")
                     
                     if poster_url and await check_portrait(poster_url):
                         # Log that the video is classified as a short with portrait orientation
-                        _LOGGER.critical(f"Video {video_id} classified as short (portrait orientation)")
+                        # _LOGGER.critical(f"Video {video_id} classified as short (portrait orientation)")
                         is_short = True
-                    else:
-                        # Log that the video is classified as a regular video
-                        _LOGGER.critical(f"Video {video_id} classified as regular video (not portrait)")
+                    # else:
+                    #     # Log that the video is classified as a regular video
+                    #     _LOGGER.critical(f"Video {video_id} classified as regular video (not portrait)")
                 
                 if is_short:
                     # Set the target list and maximum number of shorts videos
@@ -773,7 +773,7 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                     _LOGGER.debug(f"Processing video {video_id} as regular video in {target_list} with max_videos={max_videos}")
                 
                 # Log the target list being used for processing the video
-                _LOGGER.critical(f"Processing video {video_id} as {target_list}")
+                # _LOGGER.critical(f"Processing video {video_id} as {target_list}")
                 
                 if 'fanart' not in video_data:
                     # Log that fanart is being processed for the video
@@ -823,7 +823,7 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(self.data)
                 
                 # Log that the video has been processed and saved to the target list
-                _LOGGER.critical(f"Video {video_id} processed and saved to {target_list}")
+                # _LOGGER.critical(f"Video {video_id} processed and saved to {target_list}")
 
     async def async_request_refresh(self, video_id=None, is_deleted=False):
         """Trigger a data refresh, possibly for a specific video."""

@@ -23,16 +23,16 @@ from aiohttp import web
 
 
 _LOGGER = logging.getLogger(__name__)
-_LOGGER.critical("YouTube Recently Added integration module loaded")
+# _LOGGER.critical("YouTube Recently Added integration module loaded")
 
 PLATFORMS = ["sensor"]
 
 async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
-    _LOGGER.critical("handle_webhook method invoked")
-    _LOGGER.critical(f"Webhook ID received: {webhook_id}")
-    _LOGGER.critical(f"Request method: {request.method}")
+    # _LOGGER.critical("handle_webhook method invoked")
+    # _LOGGER.critical(f"Webhook ID received: {webhook_id}")
+    # _LOGGER.critical(f"Request method: {request.method}")
     from .const import get_USE_COMMENTS_AS_SUMMARY
-    _LOGGER.critical(f"USE_COMMENTS_AS_SUMMARY setting: {get_USE_COMMENTS_AS_SUMMARY()}")
+    # _LOGGER.critical(f"USE_COMMENTS_AS_SUMMARY setting: {get_USE_COMMENTS_AS_SUMMARY()}")
     try:
         if not isinstance(hass.data.get(DOMAIN), dict):
             hass.data[DOMAIN] = {}
@@ -47,10 +47,10 @@ async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
             hub_challenge = request.query.get('hub.challenge')
             hub_topic = request.query.get('hub.topic')
             
-            _LOGGER.critical(f"Processing GET request: hub.mode={hub_mode}, hub.challenge={hub_challenge}, hub.topic={hub_topic}")
+            # _LOGGER.critical(f"Processing GET request: hub.mode={hub_mode}, hub.challenge={hub_challenge}, hub.topic={hub_topic}")
             
             if hub_mode and hub_challenge:
-                _LOGGER.critical(f"Subscription verification successful. Mode: {hub_mode}, Challenge: {hub_challenge}")
+                # _LOGGER.critical(f"Subscription verification successful. Mode: {hub_mode}, Challenge: {hub_challenge}")
                 response = web.Response(text=hub_challenge)
                 return response
             
@@ -59,14 +59,14 @@ async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
 
         elif request.method == 'POST':
             data = await request.text()
-            _LOGGER.critical("Received POST data for webhook")
+            # _LOGGER.critical("Received POST data for webhook")
             try:
                 xml_dict = xmltodict.parse(data, process_namespaces=True, namespaces={
                     'http://www.w3.org/2005/Atom': None,
                     'http://www.youtube.com/xml/schemas/2015': 'yt',
                     'http://purl.org/atompub/tombstones/1.0': 'at',
                 })
-                _LOGGER.critical("Successfully parsed XML data")
+                # _LOGGER.critical("Successfully parsed XML data")
             except Exception as e:
                 _LOGGER.error(f"Error parsing XML data from webhook: {e}")
                 return web.Response(status=400, text="Invalid XML")
@@ -79,7 +79,7 @@ async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
             if 'at:deleted-entry' in feed:
                 deleted_entry = feed['at:deleted-entry']
                 video_id = deleted_entry.get('@ref', '').split(':')[-1]
-                _LOGGER.critical(f"Video deletion notification received for ID: {video_id}")
+                # _LOGGER.critical(f"Video deletion notification received for ID: {video_id}")
                 is_deleted = True
 
                 at_by = deleted_entry.get('at:by', {})
@@ -90,7 +90,7 @@ async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
                 entry = feed['entry']
                 video_id = entry.get('yt:videoId', '').strip()
                 channel_id = entry.get('yt:channelId', '').strip()
-                _LOGGER.critical(f"New video notification received. Video ID: {video_id}, Channel ID: {channel_id}")
+                # _LOGGER.critical(f"New video notification received. Video ID: {video_id}, Channel ID: {channel_id}")
 
             if not channel_id:
                 _LOGGER.critical(f"Channel ID is missing for video ID: {video_id}. Cannot proceed.")
@@ -106,13 +106,13 @@ async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
                     if coordinator:
                         coordinators.append(coordinator)
                         matched_entry_ids.append(entry_id)
-                        _LOGGER.critical(f"Found matching coordinator for entry_id: {entry_id}")
+                        # _LOGGER.critical(f"Found matching coordinator for entry_id: {entry_id}")
 
             if coordinators:
                 for coord, eid in zip(coordinators, matched_entry_ids):
                     coord.youtube.last_webhook_time = datetime.now(ZoneInfo("UTC"))
                     await coord.youtube._save_persistent_data()
-                    _LOGGER.critical(f"Processing webhook update for coordinator {eid}")
+                    # _LOGGER.critical(f"Processing webhook update for coordinator {eid}")
                     if not coord.last_update_success:
                         _LOGGER.critical(f"Coordinator {eid} not fully initialized. Scheduling delayed refresh.")
                         async def delayed_refresh(coord=coord, eid=eid):
@@ -127,7 +127,7 @@ async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
                     else:
                         try:
                             await coord.handle_webhook_update(video_id=video_id, is_deleted=is_deleted)
-                            _LOGGER.critical(f"Updated coordinator {eid} with video {video_id}")
+                            # _LOGGER.critical(f"Updated coordinator {eid} with video {video_id}")
                         except Exception as e:
                             _LOGGER.error(f"Error updating coordinator {eid}: {e}", exc_info=True)
             else:
@@ -140,18 +140,18 @@ async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
         return web.Response(status=500, text="Internal Server Error")
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    _LOGGER.critical("Starting async_setup_entry for YouTube Recently Added")
-    _LOGGER.critical(f"Entry data: {entry.data}")
+    # _LOGGER.critical("Starting async_setup_entry for YouTube Recently Added")
+    # _LOGGER.critical(f"Entry data: {entry.data}")
 
     from .const import set_USE_COMMENTS_AS_SUMMARY
     use_comments = entry.options.get(CONF_USE_COMMENTS, DEFAULT_USE_COMMENTS)
-    _LOGGER.critical(f"Loading USE_COMMENTS_AS_SUMMARY setting from config: {use_comments}")
+    # _LOGGER.critical(f"Loading USE_COMMENTS_AS_SUMMARY setting from config: {use_comments}")
     set_USE_COMMENTS_AS_SUMMARY(use_comments)
 
     try:
-        _LOGGER.critical("Initializing YouTubeAPI")
+        # _LOGGER.critical("Initializing YouTubeAPI")
         channel_ids = entry.data.get(CONF_CHANNEL_IDS, [])
-        _LOGGER.critical(f"Channel IDs from entry: {len(channel_ids)}")
+        # _LOGGER.critical(f"Channel IDs from entry: {len(channel_ids)}")
         
         # Create copy of channel IDs to ensure we don't lose them
         youtube = YouTubeAPI(
@@ -188,7 +188,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = youtube
 
         await youtube._save_persistent_data()
-        _LOGGER.critical(f"Persistent data saved")
+        # _LOGGER.critical(f"Persistent data saved")
 
         from .sensor import YouTubeDataUpdateCoordinator
         coordinator = YouTubeDataUpdateCoordinator(hass, youtube, entry)
@@ -200,7 +200,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
         async def update_statistics_and_comments(now=None):
-            _LOGGER.critical("10-minute scheduled update triggered")
+            # _LOGGER.critical("10-minute scheduled update triggered")
             if not coordinator or not coordinator.data:
                 _LOGGER.critical("No coordinator data available for update")
                 return
@@ -214,7 +214,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 all_videos.extend(coordinator.data['favorite_channels'])
             
             video_ids = list({v['id'] for v in all_videos if isinstance(v, dict) and 'id' in v})
-            _LOGGER.critical(f"Found {len(video_ids)} videos to update in scheduled refresh")
+            # _LOGGER.critical(f"Found {len(video_ids)} videos to update in scheduled refresh")
             
             if video_ids:
                 try:
@@ -236,14 +236,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     if 'comments' in stats:
                                         video['summary'] = stats['comments']
                                     updates += 1
-                        _LOGGER.critical(f"Scheduled update completed: {updates} videos updated")
+                        # _LOGGER.critical(f"Scheduled update completed: {updates} videos updated")
                         if updates > 0:
                             coordinator.async_set_updated_data(coordinator.data)
                 except Exception as e:
                     _LOGGER.critical(f"Error in scheduled update: {str(e)}", exc_info=True)
         # Register the interval (ensure this is called)
         async_track_time_interval(hass, update_statistics_and_comments, timedelta(minutes=10))
-        _LOGGER.critical("Registered 10-minute update interval")
+        # _LOGGER.critical("Registered 10-minute update interval")
 
         async def handle_quota_reset(event):
             _LOGGER.info("Quota reset event received. Resuming API calls and webhook subscriptions.")

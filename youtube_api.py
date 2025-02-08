@@ -52,7 +52,7 @@ class YouTubeAPI:
         self.refresh_token = refresh_token
         self.channel_ids = list(channel_ids) if channel_ids else []  # Convert to list and ensure not None
         self.initial_channel_ids = self.channel_ids.copy()  # Store initial copy
-        _LOGGER.critical(f"YouTubeAPI initialized with {len(self.channel_ids)} channel IDs")
+        # _LOGGER.critical(f"YouTubeAPI initialized with {len(self.channel_ids)} channel IDs")
         self.channel_ids = channel_ids if channel_ids else []
         self.initial_channel_ids = self.channel_ids.copy()
         self.hass = hass
@@ -300,14 +300,14 @@ class YouTubeAPI:
     async def initialize(self):
         try:
             _LOGGER.debug(f"Initializing YouTubeAPI. Starting quota: {self.current_quota}")
-            _LOGGER.critical(f"Starting initialize with channel_ids: {len(self.channel_ids)}")
+            # _LOGGER.critical(f"Starting initialize with channel_ids: {len(self.channel_ids)}")
 
             self.access_token = None
             self.token_expiration = None
             
             # Store initial channels before loading persistent data
             initial_channels = self.channel_ids.copy() if self.channel_ids else []
-            _LOGGER.critical(f"Stored initial channels: {len(initial_channels)} channels")
+            # _LOGGER.critical(f"Stored initial channels: {len(initial_channels)} channels")
             
             # Load persistent data
             stored_data = await self._store.async_load()
@@ -323,11 +323,11 @@ class YouTubeAPI:
                 
             # Always restore initial channels if they exist
             if initial_channels:
-                _LOGGER.critical("Restoring initial channels")
+                # _LOGGER.critical("Restoring initial channels")
                 self.channel_ids = initial_channels
                 await self._save_persistent_data()
                 
-            _LOGGER.critical(f"Channel IDs after initialization: {len(self.channel_ids)} channels")
+            # _LOGGER.critical(f"Channel IDs after initialization: {len(self.channel_ids)} channels")
             
             if self.current_quota is None:
                 self.current_quota = 0
@@ -470,7 +470,7 @@ class YouTubeAPI:
                 else:
                     _LOGGER.debug("No subscriptions found")
 
-            _LOGGER.critical(f"Fetched a total of {len(videos.get('data', []))} regular videos and {len(videos.get('shorts_data', []))} shorts across all subscriptions")
+            # _LOGGER.critical(f"Fetched a total of {len(videos.get('data', []))} regular videos and {len(videos.get('shorts_data', []))} shorts across all subscriptions")
             # _LOGGER.debug(f"Videos returned from get_recent_videos: {videos}")
             return videos
         except QuotaExceededException as qee:
@@ -485,10 +485,10 @@ class YouTubeAPI:
 
     async def get_video_by_id(self, video_id):
         # Log the initiation of the get_video_by_id method with the given video ID
-        _LOGGER.critical(f"get_video_by_id called for video ID: {video_id}")
+        # _LOGGER.critical(f"get_video_by_id called for video ID: {video_id}")
         
         # Log the current setting for using comments as summary
-        _LOGGER.critical(f"USE_COMMENTS_AS_SUMMARY is set to: {get_USE_COMMENTS_AS_SUMMARY()}")
+        # _LOGGER.critical(f"USE_COMMENTS_AS_SUMMARY is set to: {get_USE_COMMENTS_AS_SUMMARY()}")
 
         # Check if the current API quota has been exceeded
         if self.current_quota >= 10000:
@@ -544,7 +544,7 @@ class YouTubeAPI:
 
                             if not snippet_ok or not content_ok:
                                 # Log a warning if snippet or content details are invalid/incomplete
-                                _LOGGER.warning(f"Video ID {video_id} has an invalid or incomplete snippet. Returning None.")
+                                # _LOGGER.warning(f"Video ID {video_id} has an invalid or incomplete snippet. Returning None.")
                                 return None
 
                             # Parse the video's published date and time
@@ -649,7 +649,7 @@ class YouTubeAPI:
                                             live_status = "🔴 LIVE"
                                     
                                     # Log the detection of a live stream with current viewer count
-                                    _LOGGER.warning(f"Live stream detected for video {video_id} - Currently streaming with {concurrent_viewers} viewers")
+                                    # _LOGGER.warning(f"Live stream detected for video {video_id} - Currently streaming with {concurrent_viewers} viewers")
                                     
                                     # Filter and update the live stream title
                                     item['snippet']['title'] = filter_live_stream_title(item['snippet'].get('title', ''))
@@ -756,7 +756,7 @@ class YouTubeAPI:
                                                     await asyncio.sleep(5)
                                                 else:
                                                     # Log an error after exhausting all retry attempts
-                                                    _LOGGER.error(f"Failed to fetch thumbnail after all retries for video {video_id}")
+                                                    # _LOGGER.error(f"Failed to fetch thumbnail after all retries for video {video_id}")
                                                     video_data['poster'] = (
                                                         "/local/youtube_thumbnails/default_poster.jpg" 
                                                         if not is_active_stream 
@@ -799,24 +799,24 @@ class YouTubeAPI:
                                 )
                             
                             # Log that the summary processing is about to begin
-                            _LOGGER.critical(f"About to process summary for video {video_id}")
+                            # _LOGGER.critical(f"About to process summary for video {video_id}")
                             
                             if get_USE_COMMENTS_AS_SUMMARY():
                                 try:
                                     # Log the attempt to fetch comments for the summary
-                                    _LOGGER.critical("Attempting to fetch comments for summary")
+                                    # _LOGGER.critical("Attempting to fetch comments for summary")
                                     
                                     # Fetch top comments asynchronously
                                     comments = await self.fetch_top_comments(item['id'])
                                     
                                     # Log the number of comments fetched
-                                    _LOGGER.critical(f"Fetched {len(comments)} comments")
+                                    # _LOGGER.critical(f"Fetched {len(comments)} comments")
                                     
                                     # Combine comments into a summary
                                     video_data['summary'] = '\n\n'.join(comments) if comments else ''
                                     
                                     # Log a snippet of the final summary
-                                    _LOGGER.critical(f"Final summary (first 100 chars): {video_data.get('summary', '')[:100]}")
+                                    # _LOGGER.critical(f"Final summary (first 100 chars): {video_data.get('summary', '')[:100]}")
                                 except Exception as e:
                                     # Log an error if fetching comments fails and set an empty summary
                                     _LOGGER.error(f"Error processing comments for video {item['id']}: {e}")
@@ -1543,7 +1543,7 @@ class YouTubeAPI:
         return detailed_videos
 
     async def subscribe_to_pubsub(self, callback_url):
-        _LOGGER.critical("Entering subscribe_to_pubsub method")
+        # _LOGGER.critical("Entering subscribe_to_pubsub method")
         # _LOGGER.critical(f"Current channel_subscription_times: {self.channel_subscription_times}")
         # _LOGGER.critical(f"Number of channel_ids: {len(self.channel_ids)}, Number of cached subscriptions: {len(self.channel_subscription_times)}")
         hub_url = "https://pubsubhubbub.appspot.com/subscribe"
@@ -1614,9 +1614,9 @@ class YouTubeAPI:
                 _LOGGER.critical(f"Unexpected error in subscribe_to_pubsub for channel {channel_id}: {str(e)}")
                 subscription_results.append((channel_id, False))
 
-        _LOGGER.critical(f"PubSubHubbub subscription process completed. Subscribed to {channels_to_subscribe} channels out of {len(self.channel_ids)}")
-        _LOGGER.critical(f"Subscription results summary: {len([r for r in subscription_results if r[1]])} successes, {len([r for r in subscription_results if not r[1]])} failures")
-        _LOGGER.critical(f"Final channel_subscription_times: {self.channel_subscription_times}")
+        # _LOGGER.critical(f"PubSubHubbub subscription process completed. Subscribed to {channels_to_subscribe} channels out of {len(self.channel_ids)}")
+        # _LOGGER.critical(f"Subscription results summary: {len([r for r in subscription_results if r[1]])} successes, {len([r for r in subscription_results if not r[1]])} failures")
+        # _LOGGER.critical(f"Final channel_subscription_times: {self.channel_subscription_times}")
 
         await self._save_persistent_data()
         return subscription_results
@@ -1981,7 +1981,7 @@ class YouTubeAPI:
             dict: A dictionary containing updated statistics and comments for each video.
         """
         # Log the initiation of the batch update method
-        _LOGGER.critical("batch_update_video_statistics_and_comments method called")
+        # _LOGGER.critical("batch_update_video_statistics_and_comments method called")
         
         # Check if there are video IDs to process and if the quota is not exceeded
         if not video_ids or self.current_quota >= 10000:
@@ -1989,7 +1989,7 @@ class YouTubeAPI:
             return {}
         
         # Log the number of videos being processed
-        _LOGGER.critical(f"Processing {len(video_ids)} videos")
+        # _LOGGER.critical(f"Processing {len(video_ids)} videos")
         
         # Initialize a dictionary to store video statistics and comments
         video_stats = {}
@@ -2002,7 +2002,7 @@ class YouTubeAPI:
             # Iterate over the video IDs in batches
             for i in range(0, len(video_ids), batch_size):
                 batch = video_ids[i:i + batch_size]
-                _LOGGER.critical(f"Processing batch {i // batch_size + 1} with {len(batch)} videos")
+                # _LOGGER.critical(f"Processing batch {i // batch_size + 1} with {len(batch)} videos")
                 
                 # Construct the YouTube API URL for fetching video details
                 videos_url = (
@@ -2014,7 +2014,7 @@ class YouTubeAPI:
                 try:
                     # Make the GET request to the YouTube API
                     async with session.get(videos_url, headers=headers) as response:
-                        _LOGGER.critical(f"Video stats API response status: {response.status}")
+                        # _LOGGER.critical(f"Video stats API response status: {response.status}")
                         
                         if response.status == 200:
                             # Parse the JSON response
@@ -2028,7 +2028,7 @@ class YouTubeAPI:
                             # Iterate over each video item in the response
                             for item in items:
                                 video_id = item['id']
-                                _LOGGER.critical(f"Processing video {video_id}")
+                                # _LOGGER.critical(f"Processing video {video_id}")
                                 
                                 # Initialize the statistics dictionary for the video
                                 video_stats[video_id] = {
@@ -2047,12 +2047,12 @@ class YouTubeAPI:
                                 actual_end_time = live_streaming_details.get('actualEndTime')
                                 
                                 # Log live streaming details
-                                _LOGGER.critical(f"Live streaming details for {video_id}: {live_streaming_details}")
+                                # _LOGGER.critical(f"Live streaming details for {video_id}: {live_streaming_details}")
                                 
                                 # Determine if the video is currently live
                                 if actual_start_time and not actual_end_time:
-                                    _LOGGER.critical(f"Video {video_id} is live")
-                                    _LOGGER.critical(f"Full response item for live video: {item}")
+                                    # _LOGGER.critical(f"Video {video_id} is live")
+                                    # _LOGGER.critical(f"Full response item for live video: {item}")
                                     
                                     # Retrieve and format the number of concurrent viewers
                                     concurrent_viewers = int(live_streaming_details.get('concurrentViewers', '0'))
@@ -2092,7 +2092,7 @@ class YouTubeAPI:
                                 
                                 elif actual_end_time:
                                     # Handle the scenario where the live stream has ended
-                                    _LOGGER.critical(f"Video {video_id} stream ended")
+                                    # _LOGGER.critical(f"Video {video_id} stream ended")
                                     video_stats[video_id]['live_status'] = "📴 Stream ended"
                                     
                                     try:
@@ -2115,7 +2115,7 @@ class YouTubeAPI:
                                 
                                 # Determine whether to use comments as summary
                                 if get_USE_COMMENTS_AS_SUMMARY():
-                                    _LOGGER.critical(f"Fetching comments for video {video_id}")
+                                    # _LOGGER.critical(f"Fetching comments for video {video_id}")
                                     
                                     # Construct the YouTube API URL for fetching comments
                                     comments_url = (
@@ -2125,7 +2125,7 @@ class YouTubeAPI:
                                     
                                     # Make the GET request to fetch comments
                                     async with session.get(comments_url, headers=headers) as comments_response:
-                                        _LOGGER.critical(f"Comments API response status for {video_id}: {comments_response.status}")
+                                        # _LOGGER.critical(f"Comments API response status for {video_id}: {comments_response.status}")
                                         
                                         if comments_response.status == 200:
                                             # Parse the JSON response for comments
@@ -2155,7 +2155,7 @@ class YouTubeAPI:
                                             
                                             # Update the summary with fetched comments
                                             video_stats[video_id]['comments'] = '\n\n'.join(comments) if comments else ''
-                                            _LOGGER.critical(f"Added {len(comments)} comments for video {video_id}")
+                                            # _LOGGER.critical(f"Added {len(comments)} comments for video {video_id}")
                                 else:
                                     # Use the video description as the summary if comments are not used
                                     description = item.get('snippet', {}).get('description', '')
@@ -2177,22 +2177,21 @@ class YouTubeAPI:
                     _LOGGER.critical(f"Error processing batch: {str(e)}", exc_info=True)
             
             # Log the completion of the batch update process
-            _LOGGER.critical(f"Completed processing with {len(video_stats)} video updates")
+            # _LOGGER.critical(f"Completed processing with {len(video_stats)} video updates")
             
             # Return the updated video statistics and comments
             return video_stats
 
     async def fetch_top_comments(self, video_id, max_results=5):
-        """Fetch top comments for a video if quota allows, otherwise return empty list."""
-        _LOGGER.critical(f"Starting fetch_top_comments for video {video_id}")
-        _LOGGER.critical(f"Current quota: {self.current_quota}, USE_COMMENTS_AS_SUMMARY: {get_USE_COMMENTS_AS_SUMMARY}")
+        # _LOGGER.critical(f"Starting fetch_top_comments for video {video_id}")
+        # _LOGGER.critical(f"Current quota: {self.current_quota}, USE_COMMENTS_AS_SUMMARY: {get_USE_COMMENTS_AS_SUMMARY}")
 
         if self.current_quota >= 10000:
             _LOGGER.critical("Skipping comments fetch due to quota limit")
             return []
             
         try:
-            _LOGGER.critical("Ensuring valid token for comments fetch")
+            # _LOGGER.critical("Ensuring valid token for comments fetch")
             await self.ensure_valid_token()
             
             headers = {"Authorization": f"Bearer {self.access_token}"}
@@ -2211,12 +2210,12 @@ class YouTubeAPI:
                 access_check_url = f"https://www.googleapis.com/youtube/v3/commentThreads?part=id&videoId={video_id}&maxResults=1&key={self.api_key}"
                 async with session.get(access_check_url, headers=headers) as access_response:
                     if access_response.status == 403:
-                        _LOGGER.critical(f"Insufficient permissions to fetch comments for video {video_id}")
+                        # _LOGGER.critical(f"Insufficient permissions to fetch comments for video {video_id}")
                         return []
 
                 url = f"https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&videoId={video_id}&maxResults={max_results}&order=relevance&key={self.api_key}"
                 
-                _LOGGER.critical(f"Making API request to fetch comments for video {video_id}")
+                # _LOGGER.critical(f"Making API request to fetch comments for video {video_id}")
                 async with session.get(url, headers=headers) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -2252,10 +2251,10 @@ class YouTubeAPI:
                                 text = text.strip()
                                 
                                 comments.append(f"{author}\n{text}")
-                        _LOGGER.critical(f"Successfully fetched {len(comments)} comments for video {video_id}")
+                        # _LOGGER.critical(f"Successfully fetched {len(comments)} comments for video {video_id}")
                         if comments:
-                            _LOGGER.critical(f"First comment: {comments[0][:100]}...")
-                        return comments
+                            # _LOGGER.critical(f"First comment: {comments[0][:100]}...")
+                            return comments
                     elif response.status == 403:
                         _LOGGER.critical(f"403 error fetching comments for video {video_id}")
                         await self._handle_quota_exceeded(response)
