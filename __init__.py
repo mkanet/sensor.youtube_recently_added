@@ -1,8 +1,8 @@
 import logging
+import os
 import asyncio
 from datetime import datetime, timedelta
 import async_timeout
-from zoneinfo import ZoneInfo
 
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.config_entries import ConfigEntry
@@ -28,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["sensor"]
 
 async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
+    from zoneinfo import ZoneInfo
     # _LOGGER.critical("handle_webhook method invoked")
     # _LOGGER.critical(f"Webhook ID received: {webhook_id}")
     # _LOGGER.critical(f"Request method: {request.method}")
@@ -140,6 +141,7 @@ async def handle_webhook(hass: HomeAssistant, webhook_id: str, request):
         return web.Response(status=500, text="Internal Server Error")
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    from zoneinfo import ZoneInfo
     # _LOGGER.critical("Starting async_setup_entry for YouTube Recently Added")
     # _LOGGER.critical(f"Entry data: {entry.data}")
 
@@ -193,7 +195,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from .sensor import YouTubeDataUpdateCoordinator
         coordinator = YouTubeDataUpdateCoordinator(hass, youtube, entry)
         await coordinator.delete_orphaned_images({'data': []}, {'shorts_data': []})  # Clean orphaned files on startup
-        await initial_video_fetch(coordinator)
+
+        # Simple standalone cooldown check using async methods
+        cooldown_file = hass.config.path(f"{DOMAIN}_last_fetch.txt")
+        current_time = datetime.now().timestamp()
+        should_fetch = True
+
+        try:
+            file_exists = await hass.async_add_executor_job(os.path.exists, cooldown_file)
+            if file_exists:
+                def read_timestamp():
+                    with open(cooldown_file, 'r') as f:
+                        return float(f.read().strip())
+                
+                last_time = await hass.async_add_executor_job(read_timestamp)
+                if (current_time - last_time) < 3600:  # 1 hour cooldown
+                    _LOGGER.info(f"Skipping initial video fetch - last fetch was {(current_time - last_time)/60:.1f} minutes ago")
+                    should_fetch = False
+        except Exception as e:
+            _LOGGER.warning(f"Error reading cooldown file (will perform fetch): {e}")
+
+        if should_fetch:
+            await initial_video_fetch(coordinator)
+            
+            def write_timestamp():
+                with open(cooldown_file, 'w') as f:
+                    f.write(str(current_time))
+            
+            try:
+                await hass.async_add_executor_job(write_timestamp)
+            except Exception as e:
+                _LOGGER.warning(f"Could not write to cooldown file: {e}")
+
         await coordinator.async_refresh()
         hass.data[DOMAIN][f"{entry.entry_id}_coordinator"] = coordinator
 
@@ -252,7 +285,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def resume_after_quota_reset():
             _LOGGER.debug("Resubscribing to PubSubHubbub and refreshing data after quota reset.")
             callback_url = f"{get_url(hass, prefer_external=True)}{async_generate_path(WEBHOOK_ID)}"
-            _LOGGER.critical(f"Webhook callback URL: {callback_url}")
+            # _LOGGER.critical(f"Webhook callback URL: {callback_url}")
             if youtube.current_quota < 10000:
                 try:
                     await youtube.subscribe_to_pubsub(callback_url)
@@ -399,24 +432,20 @@ async def initial_video_fetch(coordinator):
                 "favorite_channels": videos.get('favorite_channels', [])
             })
             _LOGGER.info("Initial video fetch completed successfully.")
-        else:
-            _LOGGER.warning("Initial video fetch retrieved no videos.")
+        # else:
+        #     _LOGGER.warning("Initial video fetch retrieved no videos.")
     except Exception as e:
         _LOGGER.error(f"Error during initial video fetch: {e}", exc_info=True)
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Unloading YouTube Recently Added integration with entry ID: %s", entry.entry_id)
 
-    # Check if this is a reload or a removal
-    is_reload = entry.state is not None
-
-    if not is_reload:
-        persistent_notification.async_create(
-            hass,
-            "The YouTube Recently Added integration is being removed. This process may take several minutes if you're subscribed to several channels. Please wait.",
-            title="YouTube Integration Removal in Progress",
-            notification_id="youtube_integration_removal"
-        )
+    persistent_notification.async_create(
+        hass,
+        "⚠️ IMPORTANT: YouTube Recently Added integration is being removed. This process may take 1-2  minutes (or longer) with many channel subscriptions. Please be patient and DO NOT refresh or restart Home Assistant during this time.",
+        title="⏳ YouTube Integration Removal in Progress",
+        notification_id="youtube_integration_removal"
+    )
 
     # Unregister the webhook
     async_unregister(hass, WEBHOOK_ID)
@@ -446,8 +475,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
 
-    if not is_reload:
-        persistent_notification.async_dismiss(hass, "youtube_integration_removal")
+    persistent_notification.async_dismiss(hass, "youtube_integration_removal")
     _LOGGER.debug("YouTube Recently Added integration unloaded: %s", unload_ok)
     return unload_ok
 

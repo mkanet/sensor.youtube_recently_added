@@ -83,20 +83,27 @@ class YouTubeRecentlyAddedConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.youtube_api.channel_ids = channel_list  
 
             from .const import set_USE_COMMENTS_AS_SUMMARY
-            set_USE_COMMENTS_AS_SUMMARY(user_input[CONF_USE_COMMENTS])
+            use_comments = user_input.get(CONF_USE_COMMENTS, DEFAULT_USE_COMMENTS)
+            set_USE_COMMENTS_AS_SUMMARY(use_comments)
+
+            favorite_channels = user_input.get(CONF_FAVORITE_CHANNELS, DEFAULT_FAVORITE_CHANNELS)
+            
+            entry_data = {
+                CONF_API_KEY: self.youtube_api.api_key,
+                CONF_CLIENT_ID: self.youtube_api.client_id,
+                CONF_CLIENT_SECRET: self.youtube_api.client_secret,
+                CONF_REFRESH_TOKEN: refresh_token,
+                CONF_CHANNEL_IDS: self.channel_ids,
+            }
 
             entry = self.async_create_entry(
                 title="YouTube Recently Added",
-                data={
-                    CONF_API_KEY: self.youtube_api.api_key,
-                    CONF_CLIENT_ID: self.youtube_api.client_id,
-                    CONF_CLIENT_SECRET: self.youtube_api.client_secret,
-                    CONF_REFRESH_TOKEN: refresh_token,
-                    CONF_CHANNEL_IDS: self.channel_ids,
+                data=entry_data,
+                options={
                     CONF_MAX_REGULAR_VIDEOS: user_input[CONF_MAX_REGULAR_VIDEOS],
                     CONF_MAX_SHORT_VIDEOS: user_input[CONF_MAX_SHORT_VIDEOS],
-                    CONF_FAVORITE_CHANNELS: user_input[CONF_FAVORITE_CHANNELS],
-                    CONF_USE_COMMENTS: user_input[CONF_USE_COMMENTS],
+                    CONF_FAVORITE_CHANNELS: favorite_channels,
+                    CONF_USE_COMMENTS: use_comments,
                 },
             )
             self.youtube_api.config_entry = entry

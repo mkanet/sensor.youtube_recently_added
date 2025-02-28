@@ -5,6 +5,7 @@ import io
 import re
 import html
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 from isodate import parse_duration
 import numpy as np
 from PIL import Image
@@ -27,21 +28,26 @@ _LOGGER = logging.getLogger(__name__)
 class QuotaExceededException(Exception):
     pass
 
-def filter_live_stream_title(title: str) -> str:
+def filter_live_stream_title(title: str, live_status: str = None) -> str:
     LIVE_TITLE_FILTER_ENABLED = True
     if not LIVE_TITLE_FILTER_ENABLED:
         return title
+    
+    original_title = title
 
-    original_title = title    
-    if title.startswith("🔴"):
-        if "LIVE" in title[1:5]:
-            title = title[5:].lstrip(" -").lstrip()
-        else:
-            title = title[1:]
-            if title:
-                title = title[1:]
-            title = title.lstrip()
+    if "🔴" in title and live_status is not None:
+        title = title.replace("🔴", "")
+        
+        # Also remove "LIVE" if it appears at the beginning of the title
+        if title.strip().upper().startswith("LIVE"):
+            live_text = "LIVE"
+            live_pos = title.upper().find(live_text)
+            if live_pos != -1:
+                title = title[live_pos + len(live_text):].strip()
+
+        title = title.strip()
         _LOGGER.debug(f"Filtered live prefix from title: '{original_title}' -> '{title}'")
+    
     return title
 
 class YouTubeAPI:
@@ -354,6 +360,12 @@ class YouTubeAPI:
             valid_token = await self.ensure_valid_token()
             if not valid_token:
                 _LOGGER.error("Failed to ensure valid OAuth token during initialization")
+                persistent_notification.async_create(
+                    self.hass,
+                    f"Please reconfigure [YouTube Recently Added](/config/integrations) integration. OAuth token is invalid or revoked.",
+                    title="YouTube Integration Authentication Failed",
+                    notification_id="youtube_auth_failed"
+                )
                 return False
 
             self.access_token = valid_token
@@ -381,9 +393,10 @@ class YouTubeAPI:
                 "response_type": "code",
                 "scope": scope,
                 "access_type": "offline",
+                "prompt": "consent"
             }
 
-            authorization_url = f"{base_url}?client_id={params['client_id']}&redirect_uri={params['redirect_uri']}&response_type={params['response_type']}&scope={params['scope']}&access_type={params['access_type']}"
+            authorization_url = f"{base_url}?{urlencode(params)}"
 
             _LOGGER.debug("Authorization URL generated: %s", authorization_url)
             return authorization_url
@@ -404,7 +417,8 @@ class YouTubeAPI:
             "client_secret": self.client_secret,
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code",
-            "scope": "https://www.googleapis.com/auth/youtube.force-ssl"
+            "scope": "https://www.googleapis.com/auth/youtube.force-ssl",
+            "prompt": "consent"
         }
 
         try:
@@ -573,46 +587,31 @@ class YouTubeAPI:
                                 # Get the current UTC time for comparison
                                 current_time = datetime.now(ZoneInfo("UTC"))
                                 
+                                # First, handle ended streams - these should always be skipped
+                                if actual_end_time:
+                                    _LOGGER.debug(f"Skipping ended stream {video_id}")
+                                    return None
+                                
+                                # Process scheduled start time for premieres and upcoming streams
                                 if scheduled_start_time:
                                     # Parse the scheduled start time
                                     scheduled_time = datetime.strptime(scheduled_start_time, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
-                                    current_time = datetime.now(ZoneInfo("UTC"))
                                     
-                                    # Check if the scheduled stream is in the future
-                                    if scheduled_time > current_time:
-                                        if live_broadcast_content == 'upcoming' and not actual_start_time:
-                                            _LOGGER.debug(f"Processing future premiere {video_id}")
-                                            live_status = "⏰ Premiere starting soon"
-                                        else:
-                                            _LOGGER.debug(f"Skipping future scheduled stream {video_id} that hasn't started")
+                                    # For upcoming streams (premieres), handle based on scheduled time
+                                    if live_broadcast_content == 'upcoming':
+                                        # Skip future premieres that haven't reached their start time
+                                        if scheduled_time > current_time:
+                                            _LOGGER.debug(f"Skipping future premiere {video_id} - scheduled at {scheduled_time}")
                                             return None
-                                    
-                                    # Allow premieres that have started
-                                    if live_broadcast_content == 'upcoming' and scheduled_time <= current_time:
-                                        _LOGGER.debug(f"Processing started premiere {video_id}")
-                                        live_status = "🔴 PREMIERE"                                        
+                                        # For premieres that have started, set initial live status
+                                        else:
+                                            _LOGGER.debug(f"Processing started premiere {video_id}")
+                                            live_status = "🔴 PREMIERE"
+                                
                                 # Skip regular live streams that haven't started
                                 if live_broadcast_content == 'live' and not actual_start_time:
                                     _LOGGER.debug(f"Skipping offline live stream {video_id}")
                                     return None
-
-                                if actual_end_time:
-                                    # Log that an ended stream is being skipped
-                                    _LOGGER.debug(f"Skipping ended stream {video_id}")
-                                    return None
-                                
-                                if live_broadcast_content == 'live' and not actual_start_time:
-                                    # Log that an offline live stream is being skipped
-                                    _LOGGER.debug(f"Skipping offline live stream {video_id}")
-                                    return None
-
-                                if actual_end_time:
-                                    # Log that an ended stream is being skipped
-                                    _LOGGER.debug(f"Skipping ended stream {video_id}")
-                                    return None
-
-                            # Configuration flag to exclude future live streams
-                            EXCLUDE_FUTURE_LIVE_STREAMS = True
                             
                             # Initialize live status if not already set
                             if 'live_status' not in locals():
@@ -659,16 +658,6 @@ class YouTubeAPI:
                                     live_status = "📴 Stream ended"
                                     # Log that the live stream has ended
                                     _LOGGER.warning(f"Live stream detected for video {video_id} - Stream ended at {actual_end_time}")
-                                
-                                elif scheduled_start_time:
-                                    if EXCLUDE_FUTURE_LIVE_STREAMS:
-                                        # Log that a scheduled stream not yet started is being skipped
-                                        _LOGGER.debug(f"Skipping scheduled stream {video_id} - Not yet started")
-                                        return None
-                                    # Set live status for streams that are about to start
-                                    live_status = "⏰ Streaming soon"
-                                    # Log that a live stream is scheduled
-                                    _LOGGER.warning(f"Live stream detected for video {video_id} - Stream scheduled for {scheduled_start_time}")
 
                             if not is_live_stream:
                                 # Get the current UTC time
@@ -1087,19 +1076,16 @@ class YouTubeAPI:
                                     actual_start_time is not None or
                                     scheduled_start is not None
                                 ) and not actual_end
-                                
-                                if scheduled_start and not actual_start_time:
+
+                                # Handle scheduled streams properly
+                                if is_live_stream and scheduled_start and not actual_start_time:
                                     scheduled_time = datetime.strptime(scheduled_start, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
                                     if scheduled_time > datetime.now(ZoneInfo("UTC")):
                                         _LOGGER.debug(f"Skipping future scheduled stream: {video_id}")
                                         continue
-                                
-                                if is_live_stream:
-                                    if scheduled_start and not actual_start_time:
-                                        scheduled_time = datetime.strptime(scheduled_start, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
-                                        if scheduled_time > datetime.now(ZoneInfo("UTC")):
-                                            _LOGGER.debug(f"Skipping future scheduled stream: {video_id}")
-                                            continue
+                                    elif live_broadcast_content == 'upcoming':
+                                        # This is a premiere that has started
+                                        _LOGGER.debug(f"Processing started premiere: {video_id}")
                                     
                                     # Acquire lock to safely update fetched_video_ids
                                     async with self.fetched_video_ids_lock:
@@ -2168,9 +2154,9 @@ class YouTubeAPI:
                             quota_exceeded = await self._handle_quota_exceeded(response)
                             if quota_exceeded:
                                 raise QuotaExceededException("Quota exceeded while fetching video details.")
-                        else:
+                        # else:
                             # Log unexpected HTTP status codes
-                            _LOGGER.critical(f"Unexpected API status: {response.status}")
+                            # _LOGGER.critical(f"Unexpected API status: {response.status}")
                 
                 except Exception as e:
                     # Log any exceptions that occur during batch processing

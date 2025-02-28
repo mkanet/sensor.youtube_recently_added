@@ -427,25 +427,34 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                 # _LOGGER.critical(f"Video {video_id} live stream status: {is_live_stream}")
                 
                 if is_live_stream:
+                    # First, check for scheduled streams that haven't started yet
                     if scheduled_start and not actual_start_time:
                         # Parse the scheduled start time and convert it to UTC
                         scheduled_time = datetime.strptime(scheduled_start, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=ZoneInfo("UTC"))
+                        current_time = datetime.now(ZoneInfo("UTC"))
                         
-                        # Log the scheduled time and check if the stream is in the future
+                        # Log the scheduled time
                         _LOGGER.debug(f"Scheduled start time for video {video_id}: {scheduled_time}")
                         
-                        if scheduled_time > datetime.now(ZoneInfo("UTC")):
-                            # Log that the future scheduled stream is being skipped
-                            _LOGGER.critical(f"Skipping future scheduled stream {video_id} - Not yet started")
+                        # Skip if it's a future stream OR if it hasn't actually started yet
+                        if scheduled_time > current_time or not actual_start_time:
+                            # Log that the stream is being skipped
+                            _LOGGER.critical(f"Skipping stream {video_id} - Not yet started")
                             return
                         
-                        if live_broadcast_content == 'upcoming' and scheduled_time <= datetime.now(ZoneInfo("UTC")):
+                        # At this point, scheduled_time <= current_time for both premieres and regular streams
+                        if live_broadcast_content == 'upcoming':
                             _LOGGER.debug(f"Processing started premiere for video {video_id}")
-                            pass
-                        else:
-                            # Log that the offline scheduled stream is being skipped due to missing actual start time
-                            _LOGGER.critical(f"Skipping offline scheduled stream {video_id} - Start time passed but actual_start_time missing")
-                            return
+                            # Set initial live status for premieres
+                            if 'live_status' not in video_data:
+                                video_data['live_status'] = "🔴 PREMIERE"
+                                
+                            # Get updated statistics
+                            stats_result = await self.youtube.batch_update_video_statistics_and_comments([video_id])
+                            if stats_result and video_id in stats_result:
+                                if 'live_status' in stats_result[video_id]:
+                                    video_data['live_status'] = stats_result[video_id]['live_status']
+                                video_data.update(stats_result[video_id])
                     
                     if actual_start_time and not actual_end:
                         # Retrieve and format the number of concurrent viewers
@@ -565,6 +574,18 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                             
                             # Set live status to indicate the stream has ended
                             video_data['live_status'] = "📴 Stream ended"
+                            
+                            # Calculate runtime for ended stream based on actual start and end times
+                            if actual_start_time:
+                                try:
+                                    start_time = datetime.strptime(actual_start_time, '%Y-%m-%dT%H:%M:%SZ')
+                                    end_time = datetime.strptime(actual_end, '%Y-%m-%dT%H:%M:%SZ')
+                                    stream_duration_seconds = int((end_time - start_time).total_seconds())
+                                    video_data['runtime'] = str(max(1, int(stream_duration_seconds / 60)))
+                                except (ValueError, TypeError) as e:
+                                    _LOGGER.error(f"Error calculating runtime for ended stream {video_id}: {e}")
+                                    video_data['runtime'] = ""
+                            
                             video_data['airdate'] = datetime.now(ZoneInfo("UTC")).isoformat()
                             target_list = 'data'
                             
@@ -580,8 +601,9 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                             await self.store.async_save(self.data)
                             self.async_set_updated_data(self.data)
                     
-                    # Reset runtime after handling live stream details
-                    video_data['runtime'] = ""
+                    # Reset runtime only for active streams
+                    if not actual_end:
+                        video_data['runtime'] = ""
                     
                     # Process thumbnails to generate fanart and poster images
                     thumbnails = video_data['snippet'].get('thumbnails', {})
@@ -603,7 +625,18 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                         video_data['poster'] = "/local/youtube_thumbnails/default_poster.jpg" if not is_live_stream else f"/local/youtube_thumbnails/{video_id}_live_portrait.jpg"
                     
                     # Assign the live status to the video data
-                    video_data['live_status'] = live_status
+                    if is_live_stream and not live_status:
+                        # Ensure live streams always have a status
+                        if actual_end:
+                            video_data['live_status'] = "📴 Stream ended"
+                        elif actual_start_time:
+                            video_data['live_status'] = "🔴 LIVE"
+                        elif scheduled_start:
+                            video_data['live_status'] = "🔴 PREMIERE"
+                        else:
+                            video_data['live_status'] = "🔴 LIVE"
+                    else:
+                        video_data['live_status'] = live_status
                     
                     target_list = 'data'
                     max_videos = self.config_entry.options.get(CONF_MAX_REGULAR_VIDEOS, DEFAULT_MAX_REGULAR_VIDEOS)
@@ -769,7 +802,14 @@ class YouTubeDataUpdateCoordinator(DataUpdateCoordinator):
                     # Set the target list and maximum number of regular videos
                     target_list = 'data'
                     max_videos = self.config_entry.options.get(CONF_MAX_REGULAR_VIDEOS, DEFAULT_MAX_REGULAR_VIDEOS)
-                    video_data['runtime'] = str(max(1, int(duration_seconds / 60)))
+                    has_livestream_markers = (
+                        is_live_stream or
+                        live_broadcast_content in ['live', 'upcoming'] or
+                        actual_start_time is not None or
+                        scheduled_start is not None
+                    )
+                    if not has_livestream_markers:
+                        video_data['runtime'] = str(max(1, int(duration_seconds / 60)))
                     _LOGGER.debug(f"Processing video {video_id} as regular video in {target_list} with max_videos={max_videos}")
                 
                 # Log the target list being used for processing the video

@@ -38,5 +38,10 @@ That's it! You now have all required credentials for the integration!
 ## 6. Add Integration
 1. Type YouTube Recently Added
 2. Enter credentials you created in previous steps and click SUBMIT
-![Enter credentials screen](images/enter-credentials.png)
-3. 
+
+   ![Enter credentials screen](images/enter-credentials.png)
+3. In the below screen, click on the `this URL` hyperlink.
+
+   ![Authorize Access](images/authorize-access.png)
+
+4. Clicking on the hyperlink will take you to a webpage that looks like below:
