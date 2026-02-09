@@ -1,0 +1,62 @@
+{
+  "config": {
+    "step": {
+      "pick_implementation": {
+        "title": "Pick Authentication Method"
+      },
+      "api_key": {
+        "title": "YouTube API Key & Options",
+        "description": "OAuth authorization was successful! Now enter your YouTube Data API v3 key and configure options.",
+        "data": {
+          "api_key": "YouTube Data API v3 Key",
+          "max_regular_videos": "Maximum YouTube Videos",
+          "max_short_videos": "Maximum YouTube Shorts",
+          "USE_COMMENTS_AS_SUMMARY": "Top 5 comments as video summary instead of video description",
+          "favorite_channels": "Favorite channels (comma-delimited list)",
+          "filter_channels": "Filter channels (comma-delimited list)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate YouTube Integration",
+        "description": "The YouTube integration needs to be re-authenticated. Click submit to begin the OAuth authorization process.",
+        "data": {}
+      }
+    },
+    "error": {
+      "unknown": "An unexpected error occurred. Please check your Home Assistant logs for details.",
+      "cannot_connect": "Failed to connect. Please check your credentials and try again.",
+      "invalid_auth": "Invalid authentication credentials. Please check your API key, Client ID, and Client Secret.",
+      "auth_error": "Authentication failed. Please try again.",
+      "oauth2_error": "Failed to authenticate. Please check your credentials and try again.",
+      "no_refresh_token": "No refresh token received from Google. Please ensure your OAuth consent screen is set to 'External' and try again.",
+      "channel_fetch_failed": "Failed to fetch YouTube channels. Please check your API key and YouTube subscriptions."
+    },
+    "abort": {
+      "already_configured": "YouTube Recently Added is already configured.",
+      "reauth_successful": "Re-authentication was successful.",
+      "missing_credentials": "Please set up Application Credentials first.",
+      "oauth_error": "Error during OAuth authorization."
+    },
+    "create_entry": {
+      "default": "YouTube Recently Added configured successfully."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "YouTube Recently Added Options",
+        "description": "Configure the maximum number of videos to display for each sensor",
+        "data": {
+          "max_regular_videos": "Maximum YouTube Videos",
+          "max_short_videos": "Maximum YouTube Shorts",
+          "USE_COMMENTS_AS_SUMMARY": "Top 5 comments as video summary instead of video description",
+          "favorite_channels": "Favorite channels (comma-delimited list)",
+          "filter_channels": "Filter channels (comma-delimited list)"
+        }
+      }
+    }
+  },
+  "application_credentials": {
+    "description": "Follow these steps to set up YouTube OAuth credentials:\n\n1. Go to the [Google Cloud Console]({console_url})\n2. Create or select a project\n3. Enable the **YouTube Data API v3**\n4. Go to **Credentials** \u2192 **Create Credentials** \u2192 **OAuth client ID**\n5. Choose **Web application** as the application type\n6. Add `{redirect_url}` as an **Authorized redirect URI**\n7. Copy the **Client ID** and **Client Secret** below"
+  }
+}
